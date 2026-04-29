@@ -25,7 +25,7 @@ echo "📡 2. Uploader ny .jar fil til eNet-boksen..."
 ssh root@10.0.0.9 "wget -q -O /home/insta/felix-framework/bundle/startlevel4/enet-mqtt-2.0-PRODUCTION.jar http://10.0.0.2:8080/enet-mqtt-2.0-PRODUCTION.jar"
 
 echo "🔄 3. Trigger OSGi Hot-Reload via vores eget API..."
-curl -s -X POST http://10.0.0.9/mqtt/api?action=reload
+curl -s -X POST http://10.0.0.9:8090/mqtt/api?action=reload
 
 echo ""
 echo "🎉 SUCCESS! MQTT Gateway er opdateret og genstartet i hukommelsen."

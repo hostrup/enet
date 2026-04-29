@@ -7,7 +7,6 @@ import org.osgi.framework.ServiceRegistration;
 import org.osgi.service.event.Event;
 import org.osgi.service.event.EventConstants;
 import org.osgi.service.event.EventHandler;
-import org.osgi.service.http.HttpService;
 
 import com.insta.instanet.instanetbox.simplecontrol.ChangeType;
 import com.insta.instanet.instanetbox.simplecontrol.Endpoint;
@@ -19,6 +18,9 @@ import com.insta.instanet.instanetbox.simplecontrol.ISimpleControlEventHandler;
 import com.insta.instanet.instanetbox.simplecontrol.Location;
 import com.insta.instanet.instanetbox.simplecontrol.ProjectChangeType;
 import com.insta.instanet.instanetbox.simplecontrol.Scene;
+
+import com.sun.net.httpserver.HttpServer;
+import java.net.InetSocketAddress;
 
 import java.text.SimpleDateFormat;
 import java.util.Date;
@@ -38,7 +40,7 @@ public class MqttActivator implements BundleActivator, EventHandler, ISimpleCont
     private ExecutorService executor;
     private BundleContext context;
     private ServiceRegistration eventRegistration;
-    private HttpService httpService;
+    private HttpServer webServer;
     private ISimpleControl simpleControl = null;
 
     private final ConcurrentLinkedQueue<String> logBuffer = new ConcurrentLinkedQueue<>();
@@ -71,7 +73,7 @@ public class MqttActivator implements BundleActivator, EventHandler, ISimpleCont
     public void stop(BundleContext context) throws Exception {
         if (simpleControl != null) simpleControl.unregisterEventHandler(this);
         if (eventRegistration != null) eventRegistration.unregister();
-        if (httpService != null) httpService.unregister("/mqtt");
+        if (webServer != null) webServer.stop(0);
         if (executor != null) executor.shutdownNow();
         if (mqttManager != null) mqttManager.disconnect();
     }
@@ -88,13 +90,14 @@ public class MqttActivator implements BundleActivator, EventHandler, ISimpleCont
 
     private void setupWebDashboard() {
         try {
-            ServiceReference ref = context.getServiceReference(HttpService.class.getName());
-            if (ref != null) {
-                httpService = (HttpService) context.getService(ref);
-                httpService.registerServlet("/mqtt", new WebDashboard(this), null, null);
-                addLog("Web Dashboard mounted on /mqtt");
-            }
-        } catch (Exception e) { addLog("Error mounting Web Dashboard: " + e.getMessage()); }
+            webServer = HttpServer.create(new InetSocketAddress(8090), 0);
+            webServer.createContext("/mqtt", new WebDashboard(this));
+            webServer.setExecutor(executor);
+            webServer.start();
+            addLog("Web Dashboard mounted natively on port 8090");
+        } catch (Exception e) { 
+            addLog("Error mounting Web Dashboard: " + e.getMessage()); 
+        }
     }
 
     private void waitForSimpleControlAndBuild() {
