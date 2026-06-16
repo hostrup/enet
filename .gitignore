@@ -1,0 +1,19 @@
+# Java build artifacts
+**/target/
+**/*.class
+**/*.jar
+
+# Python virtual environment and cache
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# IDEs and OS files
+.idea/
+.vscode/
+.DS_Store
+
+# Local configuration / env files
+.env
+*.log

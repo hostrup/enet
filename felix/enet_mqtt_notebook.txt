@@ -1,0 +1,915 @@
+===================================================
+ JUNG ENET NATIVE MQTT GATEWAY (V11 MODULAR) 
+===================================================
+
+
+--- BEGIN: pom.xml ---
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>dk.teamr3.enet</groupId>
+    <artifactId>enet-mqtt</artifactId>
+    <version>2.0-PRODUCTION</version>
+    <packaging>bundle</packaging>
+
+    <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <maven.compiler.source>1.8</maven.compiler.source>
+        <maven.compiler.target>1.8</maven.compiler.target>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.osgi</groupId>
+            <artifactId>org.osgi.core</artifactId>
+            <version>4.2.0</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.osgi</groupId>
+            <artifactId>org.osgi.compendium</artifactId>
+            <version>4.2.0</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>javax.servlet</groupId>
+            <artifactId>servlet-api</artifactId>
+            <version>2.5</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.eclipse.paho</groupId>
+            <artifactId>org.eclipse.paho.client.mqttv3</artifactId>
+            <version>1.2.5</version>
+        </dependency>
+        <dependency>
+            <groupId>com.insta.enet</groupId>
+            <artifactId>simplecontrol</artifactId>
+            <version>2.31</version>
+            <scope>system</scope>
+            <systemPath>${project.basedir}/lib/simplecontrol.jar</systemPath>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.11.0</version>
+                <configuration>
+                    <source>1.8</source>
+                    <target>1.8</target>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.felix</groupId>
+                <artifactId>maven-bundle-plugin</artifactId>
+                <version>5.1.9</version>
+                <extensions>true</extensions>
+                <configuration>
+                    <instructions>
+                        <Bundle-SymbolicName>${project.artifactId}</Bundle-SymbolicName>
+                        <Bundle-Activator>dk.teamr3.enet.MqttActivator</Bundle-Activator>
+                        <Embed-Dependency>org.eclipse.paho.client.mqttv3</Embed-Dependency>
+                        <DynamicImport-Package>*</DynamicImport-Package>
+                        <Import-Package>
+                            org.osgi.framework,
+                            org.osgi.service.event,
+                            org.osgi.service.http,
+                            javax.servlet,
+                            javax.servlet.http,
+                            !org.eclipse.paho.*,
+                            *
+                        </Import-Package>
+                    </instructions>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+--- END: pom.xml ---
+
+
+--- BEGIN: src/main/java/dk/teamr3/enet/MqttActivator.java ---
+package dk.teamr3.enet;
+
+import org.osgi.framework.BundleActivator;
+import org.osgi.framework.BundleContext;
+import org.osgi.framework.ServiceReference;
+import org.osgi.framework.ServiceRegistration;
+import org.osgi.service.event.Event;
+import org.osgi.service.event.EventConstants;
+import org.osgi.service.event.EventHandler;
+import org.osgi.service.http.HttpService;
+
+import com.insta.instanet.instanetbox.simplecontrol.ChangeType;
+import com.insta.instanet.instanetbox.simplecontrol.Endpoint;
+import com.insta.instanet.instanetbox.simplecontrol.EndpointState;
+import com.insta.instanet.instanetbox.simplecontrol.EndpointStateLevel;
+import com.insta.instanet.instanetbox.simplecontrol.EndpointStatePower;
+import com.insta.instanet.instanetbox.simplecontrol.ISimpleControl;
+import com.insta.instanet.instanetbox.simplecontrol.ISimpleControlEventHandler;
+import com.insta.instanet.instanetbox.simplecontrol.Location;
+import com.insta.instanet.instanetbox.simplecontrol.ProjectChangeType;
+import com.insta.instanet.instanetbox.simplecontrol.Scene;
+
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Dictionary;
+import java.util.Hashtable;
+import java.util.Map;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+
+public class MqttActivator implements BundleActivator, EventHandler, ISimpleControlEventHandler {
+    
+    public volatile boolean debugMode = true; 
+
+    private ExecutorService executor;
+    private BundleContext context;
+    private ServiceRegistration eventRegistration;
+    private HttpService httpService;
+    private ISimpleControl simpleControl = null;
+
+    private final ConcurrentLinkedQueue<String> logBuffer = new ConcurrentLinkedQueue<>();
+    
+    private ConfigManager configManager;
+    private MqttManager mqttManager;
+    private TopologyBuilder topologyBuilder;
+
+    @Override
+    public void start(BundleContext context) throws Exception {
+        this.context = context;
+        this.executor = new ThreadPoolExecutor(2, 4, 60L, TimeUnit.SECONDS,
+            new ArrayBlockingQueue<Runnable>(200), new ThreadPoolExecutor.DiscardOldestPolicy());
+        
+        this.configManager = new ConfigManager(this);
+        this.mqttManager = new MqttManager(this);
+        this.topologyBuilder = new TopologyBuilder(this);
+
+        setupWebDashboard();
+        mqttManager.connectMqtt();
+
+        Dictionary<String, String[]> props = new Hashtable<>();
+        props.put(EventConstants.EVENT_TOPIC, new String[]{"*"});
+        eventRegistration = context.registerService(EventHandler.class.getName(), this, props);
+
+        executor.submit(this::waitForSimpleControlAndBuild);
+    }
+
+    @Override
+    public void stop(BundleContext context) throws Exception {
+        if (simpleControl != null) simpleControl.unregisterEventHandler(this);
+        if (eventRegistration != null) eventRegistration.unregister();
+        if (httpService != null) httpService.unregister("/mqtt");
+        if (executor != null) executor.shutdownNow();
+        if (mqttManager != null) mqttManager.disconnect();
+    }
+
+    public void addLog(String message) {
+        String ts = new SimpleDateFormat("HH:mm:ss").format(new Date());
+        logBuffer.offer(ts + " - " + message);
+        while (logBuffer.size() > 100) logBuffer.poll();
+        if (mqttManager != null && mqttManager.isConnected()) {
+            mqttManager.publish("enet/gateway/log", message, 0, false);
+        }
+        System.out.println("TeamR3: " + message);
+    }
+
+    private void setupWebDashboard() {
+        try {
+            ServiceReference ref = context.getServiceReference(HttpService.class.getName());
+            if (ref != null) {
+                httpService = (HttpService) context.getService(ref);
+                httpService.registerServlet("/mqtt", new WebDashboard(this), null, null);
+                addLog("Web Dashboard mounted on /mqtt");
+            }
+        } catch (Exception e) { addLog("Error mounting Web Dashboard: " + e.getMessage()); }
+    }
+
+    private void waitForSimpleControlAndBuild() {
+        int attempts = 0;
+        while (simpleControl == null && attempts < 60) {
+            try {
+                ServiceReference ref = context.getServiceReference(ISimpleControl.class.getName());
+                if (ref != null) simpleControl = (ISimpleControl) context.getService(ref);
+            } catch (Exception e) {}
+            if (simpleControl == null) { try { Thread.sleep(3000); } catch (Exception ignored) {} attempts++; }
+        }
+        if (simpleControl != null) {
+            simpleControl.registerEventHandler(this);
+            try { Thread.sleep(5000); } catch (Exception ignored) {} 
+            topologyBuilder.buildTopologyMap();
+        } else {
+            addLog("FATAL: ISimpleControl never loaded.");
+        }
+    }
+
+    @Override
+    public void handleEvent(final Event event) {
+        executor.submit(() -> {
+            try {
+                if (event == null) return;
+                String topic = event.getTopic();
+
+                // 1. OMNI-SNIFFER (Beholdes for fejlsøgning og synlighed)
+                if (debugMode && topic != null) {
+                    String tLower = topic.toLowerCase();
+                    if (!tLower.contains("systemtime") && !tLower.contains("metric") && !tLower.contains("task") && !tLower.contains("heartbeat") && !tLower.contains("memory") && !tLower.contains("log")) {
+                        if (topic.startsWith("MW/") || topic.startsWith("StackAdapter") || tLower.contains("button") || tLower.contains("function")) {
+                            
+                            String dUid = (String) event.getProperty("deviceUID");
+                            Object chNumObj = event.getProperty("channelNumber");
+                            String eName = "Ukendt Enhed";
+                            
+                            if (dUid != null) {
+                                Map<String, String> meta = topologyBuilder.deviceRegistryMeta.get(dUid);
+                                if (meta != null) eName = meta.get("name");
+                                if (chNumObj != null) eName += " (Knap " + chNumObj + ")";
+                            }
+
+                            StringBuilder sb = new StringBuilder("OMNI-SNIFFER [" + eName + "] | " + topic + " | Props: { ");
+                            for (String key : event.getPropertyNames()) {
+                                if (!key.equals("event.topics")) {
+                                    Object val = event.getProperty(key);
+                                    sb.append(key).append("=").append(val != null ? val.toString() : "null").append(", ");
+                                }
+                            }
+                            sb.append("}");
+                            addLog(sb.toString());
+                        }
+                    }
+                }
+
+                if (mqttManager == null || !mqttManager.isConnected()) return;
+
+                // 2. BATTERI INGRESS
+                if ("DeviceBatteryStateChanged".equals(topic)) {
+                    String uid = (String) event.getProperty("deviceUID");
+                    if (uid == null) return;
+                    Map<String, String> meta = topologyBuilder.deviceRegistryMeta.get(uid);
+                    if (meta == null || meta.get("serial") == null) return;
+
+                    String state = String.valueOf(event.getProperty("batteryState"));
+                    String payload = "{\"state\":\"" + ((state.contains("LOW") || state.contains("EMPTY")) ? "ON" : "OFF") + "\"}";
+                    mqttManager.publish("enet/sensor/battery/" + meta.get("serial") + "/state", payload, 0, true);
+                    return;
+                }
+
+                // 3. KNAP INGRESS (Fysiske Vægkontakter) - Nu skudsikker via DeviceUID + Channel
+                if ("MW/DeviceFunctionCalled".equals(topic)) {
+                    String dUid = (String) event.getProperty("deviceUID");
+                    Object chNumObj = event.getProperty("channelNumber");
+                    Boolean isPressed = (Boolean) event.getProperty("valueChanged");
+                    
+                    if (dUid != null && chNumObj != null && Boolean.TRUE.equals(isPressed)) {
+                        Map<String, String> meta = topologyBuilder.deviceRegistryMeta.get(dUid);
+                        if (meta != null) {
+                            String hexSerial = meta.get("serial");
+                            String btnUid = hexSerial + "_ch" + chNumObj;
+                            String mqttTopic = topologyBuilder.uidToTopic.get(btnUid);
+                            
+                            if (mqttTopic != null && mqttTopic.contains("/button/")) {
+                                String eName = topologyBuilder.uidToName.getOrDefault(btnUid, "Ukendt Knap");
+                                if (debugMode) addLog("DEBUG INGRESS [KNAP]: [" + eName + "] Trykket!");
+                                
+                                mqttManager.publish(mqttTopic + "/state", "PRESSED", 0, false);
+                                
+                                executor.submit(() -> {
+                                    try { Thread.sleep(300); } catch (Exception ignored) {}
+                                    mqttManager.publish(mqttTopic + "/state", "IDLE", 0, false);
+                                });
+                            }
+                        }
+                    }
+                    return;
+                }
+
+            } catch (Exception e) {
+                if (debugMode) addLog("DEBUG ERROR in handleEvent: " + e.getMessage());
+            }
+        });
+    }
+
+    // 4. AKTUATOR INGRESS (Lys og Dæmpere via ISimpleControl)
+    @Override
+    public void endpointStateChanged(String endpointId, EndpointState state) {
+        executor.submit(() -> {
+            try {
+                if (mqttManager == null || !mqttManager.isConnected() || endpointId == null) return;
+                String baseTopic = topologyBuilder.uidToTopic.get(endpointId);
+                if (baseTopic == null) return;
+                
+                String eName = topologyBuilder.uidToName.getOrDefault(endpointId, "Ukendt Enhed");
+
+                if (state instanceof EndpointStatePower) {
+                    String power = ((EndpointStatePower) state).getValue().name(); 
+                    String payload = "{\"state\":\"" + (baseTopic.contains("/cover/") ? ("ON".equals(power) ? "open" : "closed") : power) + "\"}";
+                    if (debugMode) addLog("DEBUG INGRESS (Event): [" + eName + "] Opdaterer status: " + payload);
+                    mqttManager.publish(baseTopic + "/state", payload, 0, true);
+                } else if (state instanceof EndpointStateLevel) {
+                    int pct = ((EndpointStateLevel) state).getValue();
+                    String payload = "{\"state\":\"" + (pct > 0 ? "ON" : "OFF") + "\",\"brightness\":" + Math.round((pct / 100.0) * 255.0) + "}";
+                    if (debugMode) addLog("DEBUG INGRESS (Event): [" + eName + "] Opdaterer status: " + payload);
+                    mqttManager.publish(baseTopic + "/state", payload, 0, true);
+                }
+            } catch (Exception ignored) {}
+        });
+    }
+
+    public Object getServiceByFilter(String className) {
+        try {
+            org.osgi.framework.ServiceReference[] refs = context.getServiceReferences((String)null, "(objectClass=" + className + ")");
+            if (refs != null && refs.length > 0) return context.getService(refs[0]);
+        } catch (Exception e) {} return null;
+    }
+
+    public Object safeInvoke(Object obj, String method) { return safeInvokeWithArgs(obj, method, new Class<?>[0], new Object[0]); }
+
+    public Object safeInvokeWithArgs(Object obj, String method, Class<?>[] types, Object[] args) {
+        if (obj == null) return null;
+        try {
+            java.lang.reflect.Method m = obj.getClass().getMethod(method, types);
+            m.setAccessible(true); return m.invoke(obj, args);
+        } catch (Exception e) {
+            try {
+                java.lang.reflect.Method m = obj.getClass().getDeclaredMethod(method, types);
+                m.setAccessible(true); return m.invoke(obj, args);
+            } catch (Exception e2) {
+                for (Class<?> iface : obj.getClass().getInterfaces()) {
+                    try { return iface.getMethod(method, types).invoke(obj, args); } catch (Exception e3) {}
+                }
+            }
+        } return null;
+    }
+
+    @Override public void handleControlResponse(String eId, int status, String msg, String reqId) {}
+    @Override public void endpointChanged(ChangeType cType, String eId, Endpoint ep) {}
+    @Override public void locationChanged(ChangeType cType, String locId, Location loc) {}
+    @Override public void sceneChanged(ChangeType cType, String sceneId, Scene sc) {}
+    @Override public void projectChanged(ProjectChangeType pType) {}
+
+    public ExecutorService getExecutor() { return executor; }
+    public BundleContext getContext() { return context; }
+    public ISimpleControl getSimpleControl() { return simpleControl; }
+    public ConfigManager getConfigManager() { return configManager; }
+    public MqttManager getMqttManager() { return mqttManager; }
+    public TopologyBuilder getTopologyBuilder() { return topologyBuilder; }
+    public ConcurrentLinkedQueue<String> getLogBuffer() { return logBuffer; }
+}
+--- END: src/main/java/dk/teamr3/enet/MqttActivator.java ---
+
+
+--- BEGIN: src/main/java/dk/teamr3/enet/ConfigManager.java ---
+package dk.teamr3.enet;
+
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.util.Properties;
+
+public class ConfigManager {
+    private static final String CONFIG_FILE = "/home/insta/felix-framework/conf/mqtt-gateway.properties";
+    private String mqttBroker = "";
+    private String mqttUser = "";
+    private String mqttPass = "";
+    private final MqttActivator core;
+
+    public ConfigManager(MqttActivator core) {
+        this.core = core;
+        loadConfig();
+    }
+
+    private void loadConfig() {
+        Properties p = new Properties();
+        try (FileInputStream in = new FileInputStream(CONFIG_FILE)) {
+            p.load(in);
+            mqttBroker = p.getProperty("MQTT_BROKER", "");
+            mqttUser = p.getProperty("MQTT_USER", "");
+            mqttPass = p.getProperty("MQTT_PASS", "");
+        } catch (Exception ignored) {}
+    }
+
+    public synchronized void saveConfig(String broker, String user, String pass) {
+        this.mqttBroker = broker != null ? broker : "";
+        this.mqttUser = user != null ? user : "";
+        this.mqttPass = pass != null ? pass : "";
+        Properties props = new Properties();
+        props.setProperty("MQTT_BROKER", this.mqttBroker);
+        props.setProperty("MQTT_USER", this.mqttUser);
+        props.setProperty("MQTT_PASS", this.mqttPass);
+        try (FileOutputStream out = new FileOutputStream(CONFIG_FILE)) {
+            props.store(out, "eNet Configuration");
+            core.addLog("Config saved. Reconnecting MQTT...");
+            core.getMqttManager().connectMqtt();
+        } catch (Exception e) {
+            core.addLog("Error saving config: " + e.getMessage());
+        }
+    }
+
+    public String getMqttBroker() { return mqttBroker; }
+    public String getMqttUser() { return mqttUser; }
+    public String getMqttPass() { return mqttPass; }
+}
+--- END: src/main/java/dk/teamr3/enet/ConfigManager.java ---
+
+
+--- BEGIN: src/main/java/dk/teamr3/enet/MqttManager.java ---
+package dk.teamr3.enet;
+
+import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken;
+import org.eclipse.paho.client.mqttv3.MqttCallback;
+import org.eclipse.paho.client.mqttv3.MqttClient;
+import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
+import org.eclipse.paho.client.mqttv3.MqttMessage;
+import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence;
+
+import com.insta.instanet.instanetbox.simplecontrol.EndpointStateLevel;
+import com.insta.instanet.instanetbox.simplecontrol.EndpointStatePower;
+import com.insta.instanet.instanetbox.simplecontrol.ISimpleControl;
+
+public class MqttManager implements MqttCallback {
+    private static final String CLIENT_ID = "eNet_Native_Gateway";
+    private MqttClient mqttClient;
+    private final MqttActivator core;
+
+    public MqttManager(MqttActivator core) {
+        this.core = core;
+    }
+
+    public void connectMqtt() {
+        core.getExecutor().submit(() -> {
+            try {
+                if (mqttClient != null && mqttClient.isConnected()) mqttClient.disconnect();
+                ConfigManager cfg = core.getConfigManager();
+                if (cfg.getMqttBroker().isEmpty()) return;
+
+                mqttClient = new MqttClient(cfg.getMqttBroker(), CLIENT_ID, new MemoryPersistence());
+                MqttConnectOptions o = new MqttConnectOptions();
+                o.setCleanSession(true); o.setAutomaticReconnect(true); o.setConnectionTimeout(10);
+                if (!cfg.getMqttUser().isEmpty()) o.setUserName(cfg.getMqttUser());
+                if (!cfg.getMqttPass().isEmpty()) o.setPassword(cfg.getMqttPass().toCharArray());
+                
+                mqttClient.setCallback(this);
+                mqttClient.connect(o);
+                core.addLog("MQTT Connected successfully!");
+                
+                mqttClient.subscribe("enet/#");
+            } catch (Exception e) { 
+                core.addLog("MQTT Error: " + e.getMessage()); 
+            }
+        });
+    }
+
+    public void disconnect() {
+        try { if (mqttClient != null && mqttClient.isConnected()) mqttClient.disconnect(); } catch (Exception ignored) {}
+    }
+
+    public void publish(String topic, String payload, int qos, boolean retained) {
+        if (mqttClient != null && mqttClient.isConnected()) {
+            try { mqttClient.publish(topic, payload.getBytes("UTF-8"), qos, retained); } catch (Exception ignored) {}
+        }
+    }
+
+    public boolean isConnected() { return mqttClient != null && mqttClient.isConnected(); }
+
+    @Override
+    public void messageArrived(String topic, MqttMessage message) {
+        core.getExecutor().submit(() -> {
+            try {
+                if (topic == null || !topic.endsWith("/set")) return;
+                
+                String baseTopic = topic.substring(0, topic.length() - 4);
+                String rawPayload = new String(message.getPayload(), "UTF-8");
+                String clean = rawPayload.replaceAll("[\"\\s{}]", "");
+
+                if (topic.contains("/button/")) {
+                    return;
+                }
+
+                String uid = core.getTopologyBuilder().topicToUid.get(baseTopic);
+                if (uid == null) return;
+                String eName = core.getTopologyBuilder().uidToName.getOrDefault(uid, "Ukendt Enhed");
+
+                if (core.debugMode) core.addLog("DEBUG EGRESS: [" + eName + "] (UID: " + uid + ") Modtog MQTT Kommando: " + clean);
+
+                ISimpleControl sc = core.getSimpleControl();
+                if (sc == null) return;
+
+                boolean stateOn = clean.contains("state:ON") || clean.equals("ON") || clean.contains("state:open");
+                boolean stateOff = clean.contains("state:OFF") || clean.equals("OFF") || clean.contains("state:close");
+                
+                if (stateOn || stateOff) {
+                    EndpointStatePower p = new EndpointStatePower();
+                    p.setValue(stateOn ? EndpointStatePower.Value.ON : EndpointStatePower.Value.OFF);
+                    sc.handleControlRequest(uid, p, "teamr3_mqtt");
+                    
+                    String stateJson = "{\"state\":\"" + (stateOn ? "ON".equals(p.getValue().name()) ? "open" : "closed" : p.getValue().name()) + "\"}";
+                    if (core.debugMode) core.addLog("DEBUG EGRESS: [" + eName + "] Publicerer straks status: " + stateJson);
+                    publish(baseTopic + "/state", stateJson, 0, true);
+                }
+
+                if (clean.contains("brightness:")) {
+                    int bIdx = clean.indexOf("brightness:") + 11;
+                    int bEndIdx = clean.indexOf(",", bIdx); 
+                    if (bEndIdx == -1) bEndIdx = clean.length();
+                    if (bEndIdx > bIdx) {
+                        int haBright = Integer.parseInt(clean.substring(bIdx, bEndIdx));
+                        int enetPct = (int) Math.round((haBright / 255.0) * 100.0);
+                        EndpointStateLevel level = new EndpointStateLevel(); 
+                        level.setValue(enetPct);
+                        sc.handleControlRequest(uid, level, "teamr3_mqtt");
+                        
+                        String stateJson = "{\"state\":\"ON\",\"brightness\":" + haBright + ",\"position\":" + enetPct + "}";
+                        if (core.debugMode) core.addLog("DEBUG EGRESS: [" + eName + "] Publicerer straks dæmp-status: " + stateJson);
+                        publish(baseTopic + "/state", stateJson, 0, true);
+                    }
+                }
+            } catch (Exception e) { 
+                if (core.debugMode) core.addLog("DEBUG ERROR in Egress: " + e.toString()); 
+            }
+        });
+    }
+
+    @Override public void connectionLost(Throwable cause) { core.addLog("MQTT Connection Lost. Auto-reconnecting..."); }
+    @Override public void deliveryComplete(IMqttDeliveryToken token) {}
+}
+--- END: src/main/java/dk/teamr3/enet/MqttManager.java ---
+
+
+--- BEGIN: src/main/java/dk/teamr3/enet/TopologyBuilder.java ---
+package dk.teamr3.enet;
+
+import com.insta.instanet.instanetbox.simplecontrol.Endpoint;
+import com.insta.instanet.instanetbox.simplecontrol.EndpointStateLevel;
+import com.insta.instanet.instanetbox.simplecontrol.EndpointStatePower;
+import com.insta.instanet.instanetbox.simplecontrol.ISimpleControl;
+import com.insta.instanet.instanetbox.simplecontrol.Location;
+
+import java.io.PrintWriter;
+import java.io.StringWriter;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+
+public class TopologyBuilder {
+    private static final String HA_PREFIX = "homeassistant";
+    private final MqttActivator core;
+    
+    public final Map<String, String> uidToTopic = new ConcurrentHashMap<>();
+    public final Map<String, String> topicToUid = new ConcurrentHashMap<>();
+    public final Map<String, String> locationMap = new ConcurrentHashMap<>();
+    public final Map<String, Map<String, String>> deviceRegistryMeta = new ConcurrentHashMap<>();
+    public final Map<String, String> uidToName = new ConcurrentHashMap<>(); 
+    public final List<Map<String, String>> dashboardItems = new CopyOnWriteArrayList<>();
+
+    public TopologyBuilder(MqttActivator core) {
+        this.core = core;
+    }
+
+    private List<Object> toList(Object obj) {
+        List<Object> list = new ArrayList<>();
+        if (obj == null) return list;
+        if (obj instanceof Iterable) {
+            for (Object o : (Iterable<?>) obj) list.add(o);
+        } else if (obj instanceof Object[]) {
+            for (Object o : (Object[]) obj) list.add(o);
+        }
+        return list;
+    }
+
+    public void buildTopologyMap() {
+        try {
+            core.addLog("Booting: Mapping Static Topography...");
+            uidToTopic.clear(); topicToUid.clear(); locationMap.clear(); 
+            deviceRegistryMeta.clear(); uidToName.clear(); dashboardItems.clear();
+
+            ISimpleControl simpleControl = core.getSimpleControl();
+            Object middleware = core.getServiceByFilter("com.insta.instanet.instanetbox.middleware.IMiddleware");
+            Object deviceManager = core.getServiceByFilter("com.insta.instanet.instanetbox.systemfunctions.devicemanagement.IDeviceManager");
+
+            for (Object o : toList(simpleControl.getLocations())) {
+                Location l = (Location) o;
+                if (l != null && l.getUID() != null) locationMap.put(l.getUID(), l.getName() != null ? l.getName() : "Unassigned");
+            }
+
+            publishMasterController();
+
+            if (deviceManager != null) {
+                for (Object dev : toList(core.safeInvoke(deviceManager, "getDevices"))) {
+                    String dUid = (String) core.safeInvoke(dev, "getUID");
+                    if (dUid == null) continue;
+
+                    Object devTypeObj = core.safeInvoke(dev, "getDeviceType");
+                    String modelId = devTypeObj != null ? (String) core.safeInvoke(devTypeObj, "getDeviceTypeID") : "Unknown Model";
+                    
+                    Object metaObj = core.safeInvoke(dev, "getMetaData");
+                    if (metaObj == null) metaObj = core.safeInvoke(dev, "getDeviceMetaData");
+
+                    String hexSerial = ""; 
+                    if (metaObj != null) {
+                        hexSerial = (String) core.safeInvoke(metaObj, "getSerialNumberHexFormat");
+                        if (hexSerial == null || hexSerial.isEmpty()) {
+                            Object rawSerial = core.safeInvoke(metaObj, "getSerialNumber");
+                            hexSerial = rawSerial != null ? String.valueOf(rawSerial) : dUid;
+                        }
+                    } else {
+                        hexSerial = dUid;
+                    }
+
+                    String devName = "Unknown Device";
+                    if (middleware != null) {
+                        String areaName = (String) core.safeInvokeWithArgs(middleware, "getInstallationAreaFromDevice", new Class<?>[]{String.class}, new Object[]{dUid});
+                        if (areaName != null && !areaName.trim().isEmpty()) devName = areaName;
+                    }
+
+                    if ("Unknown Device".equals(devName)) {
+                        try {
+                            Object metaData = dev.getClass().getMethod("getDeviceMetaData").invoke(dev);
+                            if (metaData != null) {
+                                try {
+                                    String desig = (String) metaData.getClass().getMethod("getDesignation").invoke(metaData);
+                                    if (desig != null && !desig.trim().isEmpty()) devName = desig;
+                                } catch (Exception ignore1) { }
+                                
+                                if ("Unknown Device".equals(devName)) {
+                                    try {
+                                        String name = (String) metaData.getClass().getMethod("getName").invoke(metaData);
+                                        if (name != null && !name.trim().isEmpty()) devName = name;
+                                    } catch (Exception ignore2) { }
+                                }
+                            }
+                        } catch (Exception e) {}
+                    }
+                    if ("Unknown Device".equals(devName) && modelId != null) devName = "JUNG " + modelId;
+
+                    Map<String, String> metaMap = new HashMap<>();
+                    metaMap.put("name", devName);
+                    metaMap.put("model", modelId);
+                    metaMap.put("serial", hexSerial);
+                    deviceRegistryMeta.put(dUid, metaMap);
+
+                    boolean isTransmitter = modelId != null && (modelId.contains("WS") || modelId.contains("HS") || modelId.contains("Transmitter"));
+
+                    for (Object ch : toList(core.safeInvoke(dev, "getDeviceChannels"))) {
+                        Integer chNum = (Integer) core.safeInvoke(ch, "getNumber");
+                        if (chNum == null) continue;
+                        
+                        String btnUid = hexSerial + "_ch" + chNum;
+
+                        if (isTransmitter) {
+                            if (chNum == 1) { 
+                                String batTopic = "enet/sensor/battery/" + hexSerial;
+                                String batConf = "{\"~\":\"" + batTopic + "\",\"name\":\"Battery Low\",\"unique_id\":\"enet_bat_" + hexSerial + "\",\"state_topic\":\"~/state\",\"value_template\":\"{{ value_json.state }}\",\"device_class\":\"battery\",\"payload_on\":\"ON\",\"payload_off\":\"OFF\",\"device\":{\"identifiers\":[\"enet_" + hexSerial + "\"],\"name\":\"" + escapeJson(devName) + "\",\"manufacturer\":\"JUNG\",\"model\":\"" + escapeJson(modelId) + "\",\"via_device\":\"enet_controller\"}}";
+                                core.getMqttManager().publish(HA_PREFIX + "/binary_sensor/enet_" + hexSerial + "_battery/config", batConf, 0, true);
+                                
+                                try {
+                                    Object batEnum = core.safeInvoke(dev, "getBatteryState");
+                                    String batStr = batEnum != null ? batEnum.toString() : "NORMAL";
+                                    String batPayload = "{\"state\":\"" + ((batStr.contains("LOW") || batStr.contains("EMPTY")) ? "ON" : "OFF") + "\"}";
+                                    core.getMqttManager().publish(batTopic + "/state", batPayload, 0, true);
+                                } catch (Exception ignore) {}
+                            }
+
+                            if (chNum >= 1 && chNum <= 8) {
+                                String btnName = devName + " Knap " + chNum;
+                                try {
+                                    Object chMeta = core.safeInvoke(ch, "getMetaData");
+                                    if (chMeta != null) {
+                                        String cName = (String) core.safeInvoke(chMeta, "getName");
+                                        if (cName != null && !cName.trim().isEmpty()) btnName = cName;
+                                    }
+                                } catch (Exception ignore) {}
+                                
+                                String baseTopic = "enet/button/" + btnUid;
+                                uidToTopic.put(btnUid, baseTopic);
+                                topicToUid.put(baseTopic, btnUid);
+                                uidToName.put(btnUid, btnName); 
+                                
+                                String btnConf = "{\"~\":\"" + baseTopic + "\",\"name\":\"" + escapeJson(btnName) + "\",\"unique_id\":\"enet_btn_" + btnUid + "\",\"state_topic\":\"~/state\",\"icon\":\"mdi:gesture-tap-button\",\"device\":{\"identifiers\":[\"enet_" + hexSerial + "\"],\"name\":\"" + escapeJson(devName) + "\",\"manufacturer\":\"JUNG\",\"model\":\"" + escapeJson(modelId) + "\",\"via_device\":\"enet_controller\"}}";
+                                core.getMqttManager().publish(HA_PREFIX + "/sensor/enet_" + btnUid + "/config", btnConf, 0, true);
+                                
+                                core.getMqttManager().publish(baseTopic + "/state", "IDLE", 0, true);
+                            }
+                        }
+                    }
+                }
+            }
+
+            for (Object o : toList(simpleControl.getEndpoints())) {
+                Endpoint e = (Endpoint) o;
+                if (e == null || e.getUID() == null || e.getType() == null) continue;
+                String uid = e.getUID();
+                String type = e.getType().name();
+                String domain = "unknown";
+                if ("LIGHT".equals(type) || "DIMMER".equals(type)) domain = "light";
+                else if ("SWITCH".equals(type)) domain = "switch";
+                else if ("BLINDS".equals(type) || "MARQUEE".equals(type)) domain = "cover";
+                if ("unknown".equals(domain)) continue;
+
+                String room = e.getLocationUID() != null ? locationMap.get(e.getLocationUID()) : "Unassigned";
+                String baseDUid = uid.contains("_") ? uid.substring(0, uid.indexOf("_")) : uid;
+                String baseTopic = "enet/" + domain + "/" + uid;
+                
+                String eName = e.getName() != null ? e.getName() : "Unknown Endpoint";
+                uidToTopic.put(uid, baseTopic);
+                topicToUid.put(baseTopic, uid);
+                uidToName.put(uid, eName); 
+                
+                Map<String, String> hwInfo = deviceRegistryMeta.get(baseDUid);
+                if (hwInfo != null) hwInfo.put("identifiers", "enet_" + baseDUid);
+                
+                publishHADiscovery(domain, uid, baseTopic, eName, hwInfo, room);
+                publishInitialState(e, baseTopic);
+                
+                Map<String, String> dash = new HashMap<>();
+                dash.put("uid", uid); dash.put("name", eName); dash.put("room", room);
+                dash.put("domain", domain); dash.put("topic", baseTopic);
+                dashboardItems.add(dash);
+            }
+
+            core.addLog("Topology Mapping Complete! Systemet er optimeret og skudsikkert.");
+        } catch (Exception e) { 
+            StringWriter sw = new StringWriter(); e.printStackTrace(new PrintWriter(sw));
+            core.addLog("Topology Error: " + sw.toString()); 
+        }
+    }
+
+    private void publishHADiscovery(String domain, String uid, String baseTopic, String entityName, Map<String, String> meta, String entityRoom) {
+        String configTopic = HA_PREFIX + "/" + domain + "/enet_" + uid + "/config";
+        StringBuilder json = new StringBuilder("{").append("\"~\":\"").append(baseTopic).append("\",")
+            .append("\"name\":\"").append(escapeJson(entityName)).append("\",").append("\"unique_id\":\"enet_").append(uid).append("\",");
+        
+        if (!"Unassigned".equals(entityRoom)) json.append("\"suggested_area\":\"").append(escapeJson(entityRoom)).append("\",");
+
+        if (meta != null) {
+            String ids = meta.containsKey("identifiers") ? meta.get("identifiers") : "enet_" + meta.get("serial");
+            json.append("\"device\":{\"identifiers\":[\"").append(ids).append("\"],\"manufacturer\":\"JUNG\",\"via_device\":\"enet_controller\",")
+                .append("\"name\":\"").append(escapeJson(meta.get("name"))).append("\",\"model\":\"").append(escapeJson(meta.get("model"))).append("\"},");
+        }
+
+        json.append("\"state_topic\":\"~/state\",\"command_topic\":\"~/set\",\"schema\":\"json\"");
+        if (baseTopic.contains("/light/")) json.append(",\"brightness\":true,\"brightness_scale\":255");
+        if ("cover".equals(domain)) json.append(",\"position_topic\":\"~/state\",\"set_position_topic\":\"~/set\",\"position_template\":\"{{ value_json.position }}\",\"value_template\":\"{{ value_json.state }}\"");
+        json.append("}");
+        core.getMqttManager().publish(configTopic, json.toString(), 0, true);
+    }
+
+    private void publishInitialState(Endpoint ep, String baseTopic) {
+        StringBuilder st = new StringBuilder("{\"state\":\"OFF\"}");
+        if (ep.getState() != null) {
+            for (Object sObj : ep.getState()) {
+                if (sObj instanceof EndpointStatePower) {
+                    st = new StringBuilder("{\"state\":\"").append(((EndpointStatePower) sObj).getValue().name()).append("\"}");
+                } else if (sObj instanceof EndpointStateLevel) {
+                    int pct = ((EndpointStateLevel) sObj).getValue();
+                    st = new StringBuilder("{\"state\":\"").append(pct > 0 ? "ON" : "OFF").append("\",\"brightness\":").append(Math.round((pct / 100.0) * 255.0)).append("}");
+                }
+            }
+        }
+        core.getMqttManager().publish(baseTopic + "/state", st.toString(), 0, true);
+    }
+
+    private void publishMasterController() {
+        String json = "{\"name\":\"eNet Server Status\",\"unique_id\":\"enet_controller_status\",\"state_topic\":\"enet/gateway/status\",\"device\":{\"identifiers\":[\"enet_controller\"],\"name\":\"JUNG eNet Server\",\"manufacturer\":\"JUNG\",\"model\":\"eNet Smart Home Box\"}}";
+        core.getMqttManager().publish(HA_PREFIX + "/sensor/enet_controller_status/config", json, 0, true);
+        core.getMqttManager().publish("enet/gateway/status", "Online", 0, true);
+    }
+
+    public String escapeJson(String input) { return input == null ? "" : input.replace("\"", "\\\""); }
+}
+--- END: src/main/java/dk/teamr3/enet/TopologyBuilder.java ---
+
+
+--- BEGIN: src/main/java/dk/teamr3/enet/WebDashboard.java ---
+package dk.teamr3.enet;
+
+import javax.servlet.ServletException;
+import javax.servlet.http.HttpServlet;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+import java.io.IOException;
+import java.util.Map;
+import com.insta.instanet.instanetbox.simplecontrol.EndpointStatePower;
+
+public class WebDashboard extends HttpServlet {
+    private static final String BUNDLE_JAR_PATH = "/home/insta/felix-framework/bundle/startlevel4/enet-mqtt-2.0-PRODUCTION.jar";
+    private final MqttActivator core;
+
+    public WebDashboard(MqttActivator core) { 
+        this.core = core; 
+    }
+
+    @Override
+    protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws ServletException, IOException {
+        String action = req.getParameter("action"); resp.setCharacterEncoding("UTF-8");
+        if ("status".equals(action)) {
+            resp.setContentType("application/json"); StringBuilder json = new StringBuilder();
+            json.append("{").append("\"broker\":\"").append(core.getTopologyBuilder().escapeJson(core.getConfigManager().getMqttBroker())).append("\",")
+                .append("\"user\":\"").append(core.getTopologyBuilder().escapeJson(core.getConfigManager().getMqttUser())).append("\",")
+                .append("\"connected\":").append(core.getMqttManager().isConnected()).append(",")
+                .append("\"debug\":").append(core.debugMode).append(",")
+                .append("\"logs\":[");
+            Object[] logs = core.getLogBuffer().toArray();
+            for (int i = 0; i < logs.length; i++) {
+                json.append("\"").append(core.getTopologyBuilder().escapeJson((String) logs[i])).append("\"");
+                if (i < logs.length - 1) json.append(",");
+            }
+            json.append("]}"); resp.getWriter().write(json.toString());
+        } else if ("devices".equals(action)) {
+            resp.setContentType("application/json"); StringBuilder json = new StringBuilder("[");
+            for (int i = 0; i < core.getTopologyBuilder().dashboardItems.size(); i++) {
+                Map<String, String> map = core.getTopologyBuilder().dashboardItems.get(i);
+                json.append("{").append("\"uid\":\"").append(core.getTopologyBuilder().escapeJson(map.get("uid"))).append("\",")
+                    .append("\"name\":\"").append(core.getTopologyBuilder().escapeJson(map.get("name"))).append("\",")
+                    .append("\"room\":\"").append(core.getTopologyBuilder().escapeJson(map.get("room"))).append("\",")
+                    .append("\"domain\":\"").append(core.getTopologyBuilder().escapeJson(map.get("domain"))).append("\",")
+                    .append("\"topic\":\"").append(core.getTopologyBuilder().escapeJson(map.get("topic"))).append("\"").append("}");
+                if (i < core.getTopologyBuilder().dashboardItems.size() - 1) json.append(",");
+            }
+            json.append("]"); resp.getWriter().write(json.toString());
+        } else {
+            resp.setContentType("text/html");
+            String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>eNet MQTT Gateway</title>" +
+                "<style>body{background:#0d1117;color:#c9d1d9;font-family:monospace;margin:0;padding:20px;} " +
+                "h1,h2{color:#58a6ff;} .panel{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:20px;margin-bottom:20px;} " +
+                "input{background:#0d1117;color:#c9d1d9;border:1px solid #30363d;padding:8px;margin-right:10px;border-radius:4px;} " +
+                "button{background:#238636;color:#fff;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;margin-right:5px;} " +
+                "button.off{background:#da3633;} button.warn{background:#d29922;color:#000;} button.info{background:#1f6feb;color:#fff;} " +
+                "#logs{height:200px;overflow-y:auto;background:#000;color:#0f0;padding:10px;font-size:12px;border:1px solid #30363d;} " +
+                "table{width:100%;border-collapse:collapse;} th,td{border:1px solid #30363d;padding:8px;text-align:left;} " +
+                ".indicator{display:inline-block;width:12px;height:12px;border-radius:50%;margin-right:8px;} .red{background:red;} .green{background:green;} " +
+                "</style></head><body><h1>eNet Native MQTT Gateway v11.0 (Modular)</h1><div class='panel'><h2>Configuration</h2>" +
+                "<div><span id='status-dot' class='indicator red'></span> <span id='status-text'>Offline</span></div><br>" +
+                "Broker IP: <input id='b' type='text' placeholder='tcp://10.0.0.6:1883' style='width:250px;'> " +
+                "User: <input id='u' type='text'> Pass: <input id='p' type='password'> <button onclick='save()'>Save & Connect</button>" +
+                "<button id='debugBtn' class='info' onclick='toggleDebug()' style='float:right; margin-left: 10px;'>Debug: OFF</button>" +
+                "<button class='warn' onclick='reloadGateway()' style='float:right;'>Hot-Reload Gateway</button></div>" +
+                "<div class='panel'><h2>Live Logs</h2><div id='logs'></div></div><div class='panel'><h2>Topology & Testing</h2>" +
+                "<table><thead><tr><th>Room</th><th>Name</th><th>Domain</th><th>Actions</th></tr></thead><tbody id='devs'></tbody></table></div>" +
+                "<script>let init=0; function uLog(){ fetch('/mqtt/api?action=status').then(r=>r.json()).then(d=>{ " +
+                "if(!init){ document.getElementById('b').value=d.broker; document.getElementById('u').value=d.user; init=1; } " +
+                "let dt=document.getElementById('status-dot'); let st=document.getElementById('status-text'); " +
+                "if(d.connected){dt.className='indicator green'; st.innerText='Connected';}else{dt.className='indicator red'; st.innerText='Offline';} " +
+                "let dbg = document.getElementById('debugBtn'); if(d.debug) { dbg.innerText = 'Debug: ON'; dbg.style.background = '#da3633'; } else { dbg.innerText = 'Debug: OFF'; dbg.style.background = '#1f6feb'; } " +
+                "let lb=document.getElementById('logs'); lb.innerHTML=d.logs.join('<br>'); lb.scrollTop=lb.scrollHeight; });} " +
+                "function uDev(){ fetch('/mqtt/api?action=devices').then(r=>r.json()).then(d=>{ let h=''; d.forEach(x=>{ " +
+                "h+='<tr><td>'+x.room+'</td><td>'+x.name+'</td><td>'+x.domain+'</td><td>'; if(x.domain==='light' || x.domain==='switch') { " +
+                "h+='<button onclick=\"tg(\\''+x.uid+'\\',\\'ON\\')\">ON</button> <button class=\"off\" onclick=\"tg(\\''+x.uid+'\\',\\'OFF\\')\">OFF</button>'; " +
+                "} h+='</td></tr>'; }); document.getElementById('devs').innerHTML=h; });} " +
+                "function save(){ let f=new URLSearchParams(); f.append('action', 'save'); f.append('b',document.getElementById('b').value); " +
+                "f.append('u',document.getElementById('u').value); f.append('p',document.getElementById('p').value); fetch('/mqtt/api',{method:'POST',body:f}).then(()=>uLog()); } " +
+                "function tg(id, st){ let f=new URLSearchParams(); f.append('action', 'toggle'); f.append('uid',id); f.append('st',st); fetch('/mqtt/api',{method:'POST',body:f}); } " +
+                "function reloadGateway(){ fetch('/mqtt/api?action=reload',{method:'POST'}); alert('Reload signal sendt. Tjek logs.'); } " +
+                "function toggleDebug(){ fetch('/mqtt/api?action=debug',{method:'POST'}).then(()=>uLog()); } " +
+                "setInterval(uLog, 2000); uLog(); setInterval(uDev, 5000);</script></body></html>";
+            resp.getWriter().write(html);
+        }
+    }
+
+    @Override
+    protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws ServletException, IOException {
+        String action = req.getParameter("action");
+        if ("save".equals(action)) {
+            core.getConfigManager().saveConfig(req.getParameter("b"), req.getParameter("u"), req.getParameter("p"));
+            resp.setStatus(200);
+        } else if ("debug".equals(action)) {
+            core.debugMode = !core.debugMode;
+            core.addLog("Debug Mode is now: " + (core.debugMode ? "ON" : "OFF"));
+            resp.setStatus(200);
+        } else if ("toggle".equals(action)) {
+            String uid = req.getParameter("uid"); String st = req.getParameter("st");
+            if (core.getSimpleControl() != null && uid != null && st != null) {
+                try {
+                    EndpointStatePower pwr = new EndpointStatePower();
+                    pwr.setValue("ON".equals(st) ? EndpointStatePower.Value.ON : EndpointStatePower.Value.OFF);
+                    core.getSimpleControl().handleControlRequest(uid, pwr, "dashboard_test");
+                    core.addLog("Dashboard Test: Sent " + st + " to " + uid);
+                } catch (Exception ex) {
+                    core.addLog("Dashboard Test Error: " + ex.getMessage());
+                }
+            }
+            resp.setStatus(200);
+        } else if ("reload".equals(action)) {
+            core.addLog("Hot-Reload signal modtaget. Genindlæser OSGi Bundle...");
+            new Thread(() -> {
+                try {
+                    Thread.sleep(1000);
+                    core.getContext().getBundle().update(new java.io.FileInputStream(new java.io.File(BUNDLE_JAR_PATH)));
+                } catch (Exception e) { System.out.println("Reload failed: " + e.getMessage()); }
+            }).start();
+            resp.setStatus(200);
+        }
+    }
+}
+--- END: src/main/java/dk/teamr3/enet/WebDashboard.java ---
+

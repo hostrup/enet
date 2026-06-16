@@ -1,0 +1,29 @@
+homeassistant:
+  name: "eNet Dev Test"
+  latitude: 55.676098
+  longitude: 12.568337
+  elevation: 10
+  unit_system: metric
+  currency: DKK
+  country: DK
+  language: da
+  time_zone: Europe/Copenhagen
+
+# Aktiver MQTT integration
+mqtt:
+  broker: mosquitto
+  port: 1883
+  username: ""
+  password: ""
+  discovery: true
+  discovery_prefix: homeassistant
+
+# Logger
+logger:
+  default: info
+  logs:
+    homeassistant.components.mqtt: debug
+
+# Tillad alle
+http:
+  ip_ban_enabled: false

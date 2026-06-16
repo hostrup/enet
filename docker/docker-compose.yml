@@ -1,0 +1,34 @@
+services:
+  # Lokal MQTT broker til eNet-udvikling
+  # Bruger port 11883 (ikke 1883) for at undgå kollision med HA's Mosquitto på 10.0.0.6:1883
+  mosquitto:
+    container_name: enet-dev-mosquitto
+    image: eclipse-mosquitto:2
+    ports:
+      - "11883:1883"     # MQTT: host:11883 → container:1883
+      - "19001:9001"     # WebSocket: host:19001 → container:9001
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - mosquitto_data:/mosquitto/data
+      - mosquitto_log:/mosquitto/log
+    restart: unless-stopped
+
+  # Home Assistant Dev-instans til eNet-test
+  # Port 8125 for ikke at kollidere med SmartMe dev på 8124
+  homeassistant-dev:
+    container_name: ha-dev-enet
+    image: "ghcr.io/home-assistant/home-assistant:stable"
+    environment:
+      - TZ=Europe/Copenhagen
+    volumes:
+      - ../test_config:/config
+    ports:
+      - "8125:8123"
+    depends_on:
+      - mosquitto
+    restart: unless-stopped
+    privileged: true
+
+volumes:
+  mosquitto_data:
+  mosquitto_log:
