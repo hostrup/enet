@@ -9,23 +9,43 @@ import java.util.Map;
 import java.util.Scanner;
 import com.insta.instanet.instanetbox.simplecontrol.EndpointStatePower;
 
+/**
+ * Handles inbound HTTP requests to the native configuration dashboard of the MQTT gateway.
+ * Serves static HTML pages, processes configuration saves, handles test actions (toggling endpoints),
+ * and exposes JSON statuses (broker details, mapped devices, live log buffer).
+ */
 public class WebDashboard implements HttpHandler {
+    /**
+     * Absolute path where the deployed OSGi bundle is hot-reloaded from.
+     */
     private static final String BUNDLE_JAR_PATH = "/home/insta/felix-framework/bundle/startlevel4/enet-mqtt-2.0-PRODUCTION.jar";
     private final MqttActivator core;
 
+    /**
+     * Constructs a WebDashboard instance.
+     * 
+     * @param core Reference to the main MqttActivator coordinator.
+     */
     public WebDashboard(MqttActivator core) { 
         this.core = core; 
     }
 
+    /**
+     * Entrypoint for the HttpServer context routing. Dispatches requests based on POST/GET actions.
+     */
     @Override
     public void handle(HttpExchange exchange) throws IOException {
         String method = exchange.getRequestMethod();
         String query = exchange.getRequestURI().getQuery();
 
         if ("POST".equalsIgnoreCase(method)) {
-            InputStream is = exchange.getRequestBody();
-            Scanner s = new Scanner(is, "UTF-8").useDelimiter("\\A");
-            String body = s.hasNext() ? s.next() : "";
+            String body;
+            try (InputStream is = exchange.getRequestBody();
+                 Scanner s = new Scanner(is, "UTF-8").useDelimiter("\\A")) {
+                body = s.hasNext() ? s.next() : "";
+            } catch (Exception e) {
+                body = "";
+            }
             
             String action = extractParam(body, "action");
             if (action == null || action.isEmpty()) {
@@ -33,13 +53,16 @@ public class WebDashboard implements HttpHandler {
             }
 
             if ("save".equals(action)) {
+                // Save updated MQTT broker parameters
                 core.getConfigManager().saveConfig(extractParam(body, "b"), extractParam(body, "u"), extractParam(body, "p"));
                 sendResponse(exchange, 200, "OK", "text/plain");
             } else if ("debug".equals(action)) {
+                // Toggle debugging mode inside the gateway
                 core.debugMode = !core.debugMode;
                 core.addLog("Debug Mode is now: " + (core.debugMode ? "ON" : "OFF"));
                 sendResponse(exchange, 200, "OK", "text/plain");
             } else if ("toggle".equals(action)) {
+                // Manually trigger a test command to the eNet simple control facade
                 String uid = extractParam(body, "uid"); 
                 String st = extractParam(body, "st");
                 if (core.getSimpleControl() != null && uid != null && st != null) {
@@ -54,12 +77,16 @@ public class WebDashboard implements HttpHandler {
                 }
                 sendResponse(exchange, 200, "OK", "text/plain");
             } else if ("reload".equals(action)) {
+                // Hot-reload the OSGi bundle directly from the jar location
                 core.addLog("Hot-Reload signal received. Reloading OSGi Bundle...");
                 sendResponse(exchange, 200, "OK", "text/plain");
                 new Thread(() -> {
                     try {
                         Thread.sleep(1000);
-                        core.getContext().getBundle().update(new java.io.FileInputStream(new java.io.File(BUNDLE_JAR_PATH)));
+                        java.io.File jarFile = new java.io.File(BUNDLE_JAR_PATH);
+                        try (java.io.FileInputStream fis = new java.io.FileInputStream(jarFile)) {
+                            core.getContext().getBundle().update(fis);
+                        }
                     } catch (Exception e) { System.out.println("Reload failed: " + e.getMessage()); }
                 }).start();
             } else {
@@ -69,6 +96,7 @@ public class WebDashboard implements HttpHandler {
             String action = extractParam(query != null ? query : "", "action");
             
             if ("status".equals(action)) {
+                // Returns JSON status showing broker credentials and active log buffer lines
                 StringBuilder json = new StringBuilder();
                 json.append("{").append("\"broker\":\"").append(core.getTopologyBuilder().escapeJson(core.getConfigManager().getMqttBroker())).append("\",")
                     .append("\"user\":\"").append(core.getTopologyBuilder().escapeJson(core.getConfigManager().getMqttUser())).append("\",")
@@ -83,19 +111,22 @@ public class WebDashboard implements HttpHandler {
                 json.append("]}"); 
                 sendResponse(exchange, 200, json.toString(), "application/json; charset=UTF-8");
             } else if ("devices".equals(action)) {
+                // Exposes the list of mapped eNet topology devices to the dashboard table
                 StringBuilder json = new StringBuilder("[");
-                for (int i = 0; i < core.getTopologyBuilder().dashboardItems.size(); i++) {
-                    Map<String, String> map = core.getTopologyBuilder().dashboardItems.get(i);
+                boolean first = true;
+                for (Map<String, String> map : core.getTopologyBuilder().dashboardItems) {
+                    if (!first) json.append(",");
+                    first = false;
                     json.append("{").append("\"uid\":\"").append(core.getTopologyBuilder().escapeJson(map.get("uid"))).append("\",")
                         .append("\"name\":\"").append(core.getTopologyBuilder().escapeJson(map.get("name"))).append("\",")
                         .append("\"room\":\"").append(core.getTopologyBuilder().escapeJson(map.get("room"))).append("\",")
                         .append("\"domain\":\"").append(core.getTopologyBuilder().escapeJson(map.get("domain"))).append("\",")
                         .append("\"topic\":\"").append(core.getTopologyBuilder().escapeJson(map.get("topic"))).append("\"").append("}");
-                    if (i < core.getTopologyBuilder().dashboardItems.size() - 1) json.append(",");
                 }
                 json.append("]"); 
                 sendResponse(exchange, 200, json.toString(), "application/json; charset=UTF-8");
             } else if ("value_map".equals(action)) {
+                // Exposes internal mappings of function values to end-user endpoints
                 StringBuilder json = new StringBuilder("{");
                 Object[] keys = core.getTopologyBuilder().valueUidToEndpointUid.keySet().toArray();
                 for (int i = 0; i < keys.length; i++) {
@@ -107,7 +138,7 @@ public class WebDashboard implements HttpHandler {
                 json.append("}");
                 sendResponse(exchange, 200, json.toString(), "application/json; charset=UTF-8");
             } else {
-                // Den originale HTML layout fra Git
+                // Serves the original HTML dashboard interface page layout from Git
                 String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>eNet MQTT Gateway</title>" +
                     "<style>body{background:#0d1117;color:#c9d1d9;font-family:monospace;margin:0;padding:20px;} " +
                     "h1,h2{color:#58a6ff;} .panel{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:20px;margin-bottom:20px;} " +
@@ -146,21 +177,35 @@ public class WebDashboard implements HttpHandler {
         }
     }
 
+    /**
+     * Helper parameter extractor for standard query and urlencoded request bodies.
+     */
     private String extractParam(String source, String paramName) {
-        String search = paramName + "=";
-        if (!source.contains(search)) return null;
+        if (source == null || source.isEmpty()) return null;
         try {
-            String val = source.split(search)[1].split("&")[0];
-            return java.net.URLDecoder.decode(val, "UTF-8");
-        } catch (Exception e) { return null; }
+            String[] pairs = source.split("&");
+            for (String pair : pairs) {
+                int idx = pair.indexOf("=");
+                if (idx != -1) {
+                    String key = java.net.URLDecoder.decode(pair.substring(0, idx), "UTF-8");
+                    if (key.equals(paramName)) {
+                        return java.net.URLDecoder.decode(pair.substring(idx + 1), "UTF-8");
+                    }
+                }
+            }
+        } catch (Exception e) { }
+        return null;
     }
 
+    /**
+     * Utility method to send an HTTP response back to the client.
+     */
     private void sendResponse(HttpExchange exchange, int statusCode, String response, String contentType) throws IOException {
         byte[] bytes = response.getBytes("UTF-8");
         exchange.getResponseHeaders().set("Content-Type", contentType);
         exchange.sendResponseHeaders(statusCode, bytes.length);
-        OutputStream os = exchange.getResponseBody();
-        os.write(bytes);
-        os.close();
+        try (OutputStream os = exchange.getResponseBody()) {
+            os.write(bytes);
+        }
     }
 }

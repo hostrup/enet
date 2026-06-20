@@ -32,55 +32,144 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ScheduledExecutorService;
+import java.lang.reflect.Method;
+import org.osgi.service.http.HttpService;
+import org.osgi.service.http.HttpContext;
+import javax.servlet.Servlet;
 
+/**
+ * The main OSGi Bundle Activator and EventHandler for the eNet MQTT Gateway.
+ * It manages the lifecycle of the bundle, sets up an internal web dashboard server,
+ * listens to eNet event notifications via EventAdmin and SimpleControl frameworks,
+ * and coordinates data dispatching through the Config, Mqtt, and Topology sub-managers.
+ */
 public class MqttActivator implements BundleActivator, EventHandler, ISimpleControlEventHandler {
     
+    /**
+     * Toggles verbose logging of internal/external events to the logs dashboard.
+     */
     public volatile boolean debugMode = true; 
 
     private ExecutorService executor;
+    private ScheduledExecutorService scheduledExecutor;
     private BundleContext context;
     private ServiceRegistration eventRegistration;
     private HttpServer webServer;
     private ISimpleControl simpleControl = null;
 
+    /**
+     * Internal ring buffer storing the last 100 log lines to display in the Web Dashboard.
+     */
     private final ConcurrentLinkedQueue<String> logBuffer = new ConcurrentLinkedQueue<>();
+    
+    /**
+     * Cache tracking button press states (UP/DOWN toggles) to differentiate switch timings.
+     */
     private final java.util.Map<String, String> buttonRockerStates = new java.util.concurrent.ConcurrentHashMap<>();
     
+    /**
+     * Cache for reflection methods.
+     */
+    private final java.util.Map<String, Method> reflectionCache = new java.util.concurrent.ConcurrentHashMap<>();
+
+    private static final SimpleDateFormat LOG_TIME_FORMAT = new SimpleDateFormat("HH:mm:ss");
+
     private ConfigManager configManager;
     private MqttManager mqttManager;
     private TopologyBuilder topologyBuilder;
 
+    /**
+     * OSGi Activator hook. Invoked when the bundle is loaded and started by the Felix container.
+     * Initializes configuration properties, MQTT connectivity, the topology builder, and spins
+     * up the local HTTP web console, registering as an EventHandler in the container.
+     */
     @Override
     public void start(BundleContext context) throws Exception {
         this.context = context;
         this.executor = new ThreadPoolExecutor(2, 4, 60L, TimeUnit.SECONDS,
             new ArrayBlockingQueue<Runnable>(200), new ThreadPoolExecutor.DiscardOldestPolicy());
+        this.scheduledExecutor = java.util.concurrent.Executors.newScheduledThreadPool(1);
         
         this.configManager = new ConfigManager(this);
         this.mqttManager = new MqttManager(this);
         this.topologyBuilder = new TopologyBuilder(this);
 
         setupWebDashboard();
+        registerGdsServlet();
         mqttManager.connectMqtt();
 
         Dictionary<String, String[]> props = new Hashtable<>();
-        props.put(EventConstants.EVENT_TOPIC, new String[]{"*"});
+        props.put(EventConstants.EVENT_TOPIC, new String[]{"MW/ValueChanged", "DeviceBatteryStateChanged"});
         eventRegistration = context.registerService(EventHandler.class.getName(), this, props);
 
         executor.submit(this::waitForSimpleControlAndBuild);
     }
 
+    /**
+     * OSGi Activator hook. Invoked when the bundle is stopped or uninstalled.
+     * Performs graceful cleanup by unregistering listeners, shutting down the HTTP dashboard,
+     * shutting down the local worker thread pool, and disconnecting the MQTT broker.
+     */
     @Override
     public void stop(BundleContext context) throws Exception {
-        if (simpleControl != null) simpleControl.unregisterEventHandler(this);
-        if (eventRegistration != null) eventRegistration.unregister();
-        if (webServer != null) webServer.stop(0);
-        if (executor != null) executor.shutdownNow();
-        if (mqttManager != null) mqttManager.disconnect();
+        try {
+            if (simpleControl != null) simpleControl.unregisterEventHandler(this);
+        } catch (Exception e) {
+            System.err.println("Error unregistering simpleControl: " + e.getMessage());
+        }
+
+        try {
+            if (eventRegistration != null) eventRegistration.unregister();
+        } catch (Exception e) {
+            System.err.println("Error unregistering eventRegistration: " + e.getMessage());
+        }
+
+        try {
+            if (webServer != null) webServer.stop(0);
+        } catch (Exception e) {
+            System.err.println("Error stopping webServer: " + e.getMessage());
+        }
+
+        try {
+            org.osgi.framework.ServiceReference httpRef = context.getServiceReference(HttpService.class.getName());
+            if (httpRef != null) {
+                HttpService httpService = (HttpService) context.getService(httpRef);
+                httpService.unregister("/gds");
+                addLog("GDS: Unregistered GdsServlet.");
+            }
+        } catch (Exception ignored) {}
+
+        try {
+            if (executor != null) executor.shutdownNow();
+        } catch (Exception e) {
+            System.err.println("Error shutting down executor: " + e.getMessage());
+        }
+
+        try {
+            if (scheduledExecutor != null) scheduledExecutor.shutdownNow();
+        } catch (Exception e) {
+            System.err.println("Error shutting down scheduledExecutor: " + e.getMessage());
+        }
+
+        try {
+            if (mqttManager != null) mqttManager.disconnect();
+        } catch (Exception e) {
+            System.err.println("Error disconnecting mqttManager: " + e.getMessage());
+        }
     }
 
+    /**
+     * Appends a log message prefixed with a time stamp to the ring buffer.
+     * Also publishes it to the MQTT topic "enet/gateway/log" if connected.
+     * 
+     * @param message The raw log message string.
+     */
     public void addLog(String message) {
-        String ts = new SimpleDateFormat("HH:mm:ss").format(new Date());
+        String ts;
+        synchronized (LOG_TIME_FORMAT) {
+            ts = LOG_TIME_FORMAT.format(new Date());
+        }
         logBuffer.offer(ts + " - " + message);
         while (logBuffer.size() > 100) logBuffer.poll();
         if (mqttManager != null && mqttManager.isConnected()) {
@@ -89,11 +178,14 @@ public class MqttActivator implements BundleActivator, EventHandler, ISimpleCont
         System.out.println("HostrupEnet: " + message);
     }
 
+    /**
+     * Initializes the built-in HTTP server on port 8090 to host the Web UI configuration panel.
+     */
     private void setupWebDashboard() {
         try {
             webServer = HttpServer.create(new InetSocketAddress(8090), 0);
             webServer.createContext("/mqtt", new WebDashboard(this));
-            webServer.setExecutor(executor);
+            webServer.setExecutor(null);
             webServer.start();
             addLog("Web Dashboard mounted natively on port 8090");
         } catch (Exception e) { 
@@ -101,6 +193,47 @@ public class MqttActivator implements BundleActivator, EventHandler, ISimpleCont
         }
     }
 
+    /**
+     * Dynamically loads and mounts JUNG's internal Gira Device Service (GDS) REST API under /gds.
+     */
+    private void registerGdsServlet() {
+        try {
+            org.osgi.framework.Bundle gdsBundle = null;
+            for (org.osgi.framework.Bundle b : context.getBundles()) {
+                if ("com.insta.instanet.instanetbox.servlet".equals(b.getSymbolicName())) {
+                    gdsBundle = b;
+                    break;
+                }
+            }
+            if (gdsBundle == null) {
+                addLog("GDS: Bundle com.insta.instanet.instanetbox.servlet not found.");
+                return;
+            }
+            Class<?> gdsServletClass = gdsBundle.loadClass("de.infoteam.insta.instaboxservlet.servlets.GdsServlet");
+            if (gdsServletClass == null) {
+                addLog("GDS: GdsServlet class not found in bundle.");
+                return;
+            }
+            Servlet gdsServlet = (Servlet) gdsServletClass.newInstance();
+            
+            org.osgi.framework.ServiceReference httpRef = context.getServiceReference(HttpService.class.getName());
+            if (httpRef != null) {
+                HttpService httpService = (HttpService) context.getService(httpRef);
+                HttpContext httpContext = httpService.createDefaultHttpContext();
+                httpService.registerServlet("/gds", gdsServlet, null, httpContext);
+                addLog("GDS: Successfully registered GdsServlet under /gds");
+            } else {
+                addLog("GDS: HttpService reference not found.");
+            }
+        } catch (Exception e) {
+            addLog("GDS: Error registering GdsServlet dynamically: " + e.toString());
+        }
+    }
+
+    /**
+     * Periodically queries the OSGi BundleContext for the ISimpleControl service.
+     * Once resolved, registers the activator as an event handler and triggers topology building.
+     */
     private void waitForSimpleControlAndBuild() {
         int attempts = 0;
         while (simpleControl == null && attempts < 60) {
@@ -108,11 +241,26 @@ public class MqttActivator implements BundleActivator, EventHandler, ISimpleCont
                 ServiceReference ref = context.getServiceReference(ISimpleControl.class.getName());
                 if (ref != null) simpleControl = (ISimpleControl) context.getService(ref);
             } catch (Exception e) {}
-            if (simpleControl == null) { try { Thread.sleep(3000); } catch (Exception ignored) {} attempts++; }
+            if (simpleControl == null) {
+                try {
+                    Thread.sleep(3000);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    addLog("Startup loop interrupted while waiting for ISimpleControl.");
+                    return;
+                } catch (Exception ignored) {}
+                attempts++;
+            }
         }
         if (simpleControl != null) {
             simpleControl.registerEventHandler(this);
-            try { Thread.sleep(5000); } catch (Exception ignored) {} 
+            try {
+                Thread.sleep(5000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                addLog("Startup loop interrupted after registering event handler.");
+                return;
+            } catch (Exception ignored) {} 
             topologyBuilder.buildTopologyMap();
         } else {
             addLog("FATAL: ISimpleControl never loaded.");
@@ -170,7 +318,7 @@ public class MqttActivator implements BundleActivator, EventHandler, ISimpleCont
                     return;
                 }
 
-                // 3. VALUE CHANGE INGRESS (Actuator feedback and physical transmitter button rocker decoding)
+                // 3. VALUE CHANGE INGRESS (Transmitter button rocker decoding only; actuator status is in endpointStateChanged)
                 if ("MW/ValueChanged".equals(topic)) {
                     String valueUID = (String) event.getProperty("valueUID");
                     Object valObj = event.getProperty("value");
@@ -181,23 +329,7 @@ public class MqttActivator implements BundleActivator, EventHandler, ISimpleCont
                         if (endpointUID != null) {
                             String baseTopic = topologyBuilder.uidToTopic.get(endpointUID);
                             
-                            if (baseTopic != null) {
-                                // Standard actuator value updates (Lights/Switches)
-                                String eName = topologyBuilder.uidToName.getOrDefault(endpointUID, "Unknown Device");
-                                String payload = null;
-                                if ("VT_SWITCH".equals(valueTypeID)) {
-                                    boolean isOn = (Boolean) valObj;
-                                    payload = "{\"state\":\"" + (isOn ? "ON" : "OFF") + "\"}";
-                                } else if ("VT_ABSOLUTE_LEVEL".equals(valueTypeID)) {
-                                    int level = (Integer) valObj;
-                                    payload = "{\"state\":\"" + (level > 0 ? "ON" : "OFF") + "\",\"brightness\":" + Math.round((level / 100.0) * 255.0) + "}";
-                                }
-                                
-                                if (payload != null) {
-                                    if (debugMode) addLog("DEBUG INGRESS (EventAdmin): [" + eName + "] Updating status: " + payload);
-                                    mqttManager.publish(baseTopic + "/state", payload, 0, true);
-                                }
-                            } else {
+                            if (baseTopic == null) {
                                 // Transmitter button event (endpointUID maps to no baseTopic, but has rocker state/time properties)
                                 if (endpointUID.contains("_")) {
                                     String dUid = endpointUID.substring(0, endpointUID.indexOf("_"));
@@ -240,10 +372,9 @@ public class MqttActivator implements BundleActivator, EventHandler, ISimpleCont
                                                 mqttManager.publish(btnTopic + "/state", btnState, 0, false);
                                                 
                                                 final String finalTopic = btnTopic;
-                                                executor.submit(() -> {
-                                                    try { Thread.sleep(350); } catch (Exception ignored) {}
+                                                scheduledExecutor.schedule(() -> {
                                                     mqttManager.publish(finalTopic + "/state", "IDLE", 0, false);
-                                                });
+                                                }, 350, TimeUnit.MILLISECONDS);
                                             }
                                         }
                                     }
@@ -260,7 +391,7 @@ public class MqttActivator implements BundleActivator, EventHandler, ISimpleCont
         });
     }
 
-    // 4. ACTUATOR INGRESS (Lights and Dimmers via ISimpleControl)
+    // 4. ACTUATOR INGRESS (Lights, Dimmers and Covers via ISimpleControl)
     @Override
     public void endpointStateChanged(String endpointId, EndpointState state) {
         executor.submit(() -> {
@@ -286,8 +417,13 @@ public class MqttActivator implements BundleActivator, EventHandler, ISimpleCont
                     mqttManager.publish(baseTopic + "/state", payload, 0, true);
                 } else if (state instanceof EndpointStateLevel) {
                     int pct = ((EndpointStateLevel) state).getValue();
-                    String payload = "{\"state\":\"" + (pct > 0 ? "ON" : "OFF") + "\",\"brightness\":" + Math.round((pct / 100.0) * 255.0) + "}";
-                    if (debugMode) addLog("DEBUG INGRESS (Event): [" + eName + "] Updating dim level status to: " + payload);
+                    String payload;
+                    if (baseTopic.contains("/cover/")) {
+                        payload = "{\"state\":\"" + (pct > 0 ? "open" : "closed") + "\",\"position\":" + pct + "}";
+                    } else {
+                        payload = "{\"state\":\"" + (pct > 0 ? "ON" : "OFF") + "\",\"brightness\":" + Math.round((pct / 100.0) * 255.0) + "}";
+                    }
+                    if (debugMode) addLog("DEBUG INGRESS (Event): [" + eName + "] Updating level status to: " + payload);
                     mqttManager.publish(baseTopic + "/state", payload, 0, true);
                 } else {
                     if (debugMode) addLog("DEBUG INGRESS (Event): State type not handled: " + state.getClass().getName());
@@ -307,21 +443,51 @@ public class MqttActivator implements BundleActivator, EventHandler, ISimpleCont
 
     public Object safeInvoke(Object obj, String method) { return safeInvokeWithArgs(obj, method, new Class<?>[0], new Object[0]); }
 
+    private String getCacheKey(Class<?> clazz, String methodName, Class<?>[] parameterTypes) {
+        StringBuilder sb = new StringBuilder(clazz.getName()).append("#").append(methodName);
+        if (parameterTypes != null) {
+            for (Class<?> p : parameterTypes) {
+                sb.append(":").append(p.getName());
+            }
+        }
+        return sb.toString();
+    }
+
     public Object safeInvokeWithArgs(Object obj, String method, Class<?>[] types, Object[] args) {
         if (obj == null) return null;
-        try {
-            java.lang.reflect.Method m = obj.getClass().getMethod(method, types);
-            m.setAccessible(true); return m.invoke(obj, args);
-        } catch (Exception e) {
+        Class<?> clazz = obj.getClass();
+        String key = getCacheKey(clazz, method, types);
+        Method m = reflectionCache.get(key);
+        if (m == null) {
             try {
-                java.lang.reflect.Method m = obj.getClass().getDeclaredMethod(method, types);
-                m.setAccessible(true); return m.invoke(obj, args);
-            } catch (Exception e2) {
-                for (Class<?> iface : obj.getClass().getInterfaces()) {
-                    try { return iface.getMethod(method, types).invoke(obj, args); } catch (Exception e3) {}
+                m = clazz.getMethod(method, types);
+                m.setAccessible(true);
+                reflectionCache.put(key, m);
+            } catch (Exception e) {
+                try {
+                    m = clazz.getDeclaredMethod(method, types);
+                    m.setAccessible(true);
+                    reflectionCache.put(key, m);
+                } catch (Exception e2) {
+                    for (Class<?> iface : clazz.getInterfaces()) {
+                        try {
+                            m = iface.getMethod(method, types);
+                            m.setAccessible(true);
+                            reflectionCache.put(key, m);
+                            break;
+                        } catch (Exception e3) {}
+                    }
                 }
             }
-        } return null;
+        }
+        if (m != null) {
+            try {
+                return m.invoke(obj, args);
+            } catch (Exception e) {
+                // Ignore invocation exceptions and return null
+            }
+        }
+        return null;
     }
 
     @Override public void handleControlResponse(String eId, int status, String msg, String reqId) {}
