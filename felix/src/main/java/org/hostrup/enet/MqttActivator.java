@@ -49,10 +49,11 @@ public class MqttActivator implements BundleActivator, EventHandler, ISimpleCont
     /**
      * Toggles verbose logging of internal/external events to the logs dashboard.
      */
-    public volatile boolean debugMode = true; 
+    public volatile boolean debugMode = false; 
 
     private ExecutorService executor;
     private ScheduledExecutorService scheduledExecutor;
+    private ExecutorService webServerExecutor;
     private BundleContext context;
     private ServiceRegistration eventRegistration;
     private HttpServer webServer;
@@ -90,13 +91,13 @@ public class MqttActivator implements BundleActivator, EventHandler, ISimpleCont
         this.executor = new ThreadPoolExecutor(2, 4, 60L, TimeUnit.SECONDS,
             new ArrayBlockingQueue<Runnable>(200), new ThreadPoolExecutor.DiscardOldestPolicy());
         this.scheduledExecutor = java.util.concurrent.Executors.newScheduledThreadPool(1);
+        this.webServerExecutor = java.util.concurrent.Executors.newFixedThreadPool(2);
         
         this.configManager = new ConfigManager(this);
         this.mqttManager = new MqttManager(this);
         this.topologyBuilder = new TopologyBuilder(this);
 
         setupWebDashboard();
-        registerGdsServlet();
         mqttManager.connectMqtt();
 
         Dictionary<String, String[]> props = new Hashtable<>();
@@ -132,13 +133,10 @@ public class MqttActivator implements BundleActivator, EventHandler, ISimpleCont
         }
 
         try {
-            org.osgi.framework.ServiceReference httpRef = context.getServiceReference(HttpService.class.getName());
-            if (httpRef != null) {
-                HttpService httpService = (HttpService) context.getService(httpRef);
-                httpService.unregister("/gds");
-                addLog("GDS: Unregistered GdsServlet.");
-            }
-        } catch (Exception ignored) {}
+            if (webServerExecutor != null) webServerExecutor.shutdownNow();
+        } catch (Exception e) {
+            System.err.println("Error shutting down webServerExecutor: " + e.getMessage());
+        }
 
         try {
             if (executor != null) executor.shutdownNow();
@@ -175,7 +173,10 @@ public class MqttActivator implements BundleActivator, EventHandler, ISimpleCont
         if (mqttManager != null && mqttManager.isConnected()) {
             mqttManager.publish("enet/gateway/log", message, 0, false);
         }
-        System.out.println("HostrupEnet: " + message);
+        // Only write to syslog/disk for critical/config messages to save eMMC flash writes and CPU
+        if (!message.startsWith("OMNI-SNIFFER") && !message.startsWith("DEBUG")) {
+            System.out.println("HostrupEnet: " + message);
+        }
     }
 
     /**
@@ -185,48 +186,11 @@ public class MqttActivator implements BundleActivator, EventHandler, ISimpleCont
         try {
             webServer = HttpServer.create(new InetSocketAddress(8090), 0);
             webServer.createContext("/mqtt", new WebDashboard(this));
-            webServer.setExecutor(null);
+            webServer.setExecutor(webServerExecutor);
             webServer.start();
             addLog("Web Dashboard mounted natively on port 8090");
         } catch (Exception e) { 
             addLog("Error mounting Web Dashboard: " + e.getMessage()); 
-        }
-    }
-
-    /**
-     * Dynamically loads and mounts JUNG's internal Gira Device Service (GDS) REST API under /gds.
-     */
-    private void registerGdsServlet() {
-        try {
-            org.osgi.framework.Bundle gdsBundle = null;
-            for (org.osgi.framework.Bundle b : context.getBundles()) {
-                if ("com.insta.instanet.instanetbox.servlet".equals(b.getSymbolicName())) {
-                    gdsBundle = b;
-                    break;
-                }
-            }
-            if (gdsBundle == null) {
-                addLog("GDS: Bundle com.insta.instanet.instanetbox.servlet not found.");
-                return;
-            }
-            Class<?> gdsServletClass = gdsBundle.loadClass("de.infoteam.insta.instaboxservlet.servlets.GdsServlet");
-            if (gdsServletClass == null) {
-                addLog("GDS: GdsServlet class not found in bundle.");
-                return;
-            }
-            Servlet gdsServlet = (Servlet) gdsServletClass.newInstance();
-            
-            org.osgi.framework.ServiceReference httpRef = context.getServiceReference(HttpService.class.getName());
-            if (httpRef != null) {
-                HttpService httpService = (HttpService) context.getService(httpRef);
-                HttpContext httpContext = httpService.createDefaultHttpContext();
-                httpService.registerServlet("/gds", gdsServlet, null, httpContext);
-                addLog("GDS: Successfully registered GdsServlet under /gds");
-            } else {
-                addLog("GDS: HttpService reference not found.");
-            }
-        } catch (Exception e) {
-            addLog("GDS: Error registering GdsServlet dynamically: " + e.toString());
         }
     }
 
