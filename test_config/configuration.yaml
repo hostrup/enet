@@ -11,12 +11,6 @@ homeassistant:
 
 # Aktiver MQTT integration
 mqtt:
-  broker: mosquitto
-  port: 1883
-  username: ""
-  password: ""
-  discovery: true
-  discovery_prefix: homeassistant
 
 # Logger
 logger:

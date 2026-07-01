@@ -17,3 +17,5 @@ __pycache__/
 # Local configuration / env files
 .env
 *.log
+test_config/
+
