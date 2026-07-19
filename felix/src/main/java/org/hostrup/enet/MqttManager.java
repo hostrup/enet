@@ -2,6 +2,7 @@ package org.hostrup.enet;
 
 import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken;
 import org.eclipse.paho.client.mqttv3.MqttCallback;
+import org.eclipse.paho.client.mqttv3.MqttCallbackExtended;
 import org.eclipse.paho.client.mqttv3.MqttClient;
 import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
 import org.eclipse.paho.client.mqttv3.MqttMessage;
@@ -19,7 +20,7 @@ import com.google.gson.JsonParser;
  * Manages the connection, subscription, publication, and message dispatching
  * for the Eclipse Paho MQTT Client, bridging the local eNet system to the MQTT Broker.
  */
-public class MqttManager implements MqttCallback {
+public class MqttManager implements MqttCallbackExtended {
     private static final String CLIENT_ID = "eNet_Native_Gateway";
     private volatile MqttClient mqttClient;
     private final MqttActivator core;
@@ -41,6 +42,9 @@ public class MqttManager implements MqttCallback {
     public void connectMqtt() {
         core.getExecutor().submit(() -> {
             synchronized (connectLock) {
+                if (mqttClient != null && mqttClient.isConnected()) {
+                    return;
+                }
                 try {
                     if (mqttClient != null) {
                         try {
@@ -65,13 +69,23 @@ public class MqttManager implements MqttCallback {
                     
                     mqttClient.setCallback(this);
                     mqttClient.connect(o);
-                    core.addLog("MQTT Connected successfully!");
-                    
-                    // Subscribe to all eNet-related commands
-                    mqttClient.subscribe("enet/#");
                 } catch (Exception e) { 
                     core.addLog("MQTT Error: " + e.getMessage()); 
                 }
+            }
+        });
+    }
+
+    @Override
+    public void connectComplete(boolean reconnect, String serverURI) {
+        core.getExecutor().submit(() -> {
+            try {
+                if (mqttClient != null && mqttClient.isConnected()) {
+                    mqttClient.subscribe("enet/#");
+                    core.addLog("MQTT Connected successfully! (reconnect=" + reconnect + ", uri=" + serverURI + "). Subscribed to enet/#");
+                }
+            } catch (Exception e) {
+                core.addLog("MQTT Subscription Error: " + e.getMessage());
             }
         });
     }

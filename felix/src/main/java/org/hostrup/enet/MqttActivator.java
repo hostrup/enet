@@ -100,6 +100,18 @@ public class MqttActivator implements BundleActivator, EventHandler, ISimpleCont
         setupWebDashboard();
         mqttManager.connectMqtt();
 
+        // Start a watchdog to monitor the MQTT connection and attempt reconnection if lost
+        scheduledExecutor.scheduleWithFixedDelay(() -> {
+            try {
+                if (mqttManager != null && !mqttManager.isConnected()) {
+                    addLog("Watchdog: MQTT disconnected. Reconnecting...");
+                    mqttManager.connectMqtt();
+                }
+            } catch (Exception e) {
+                addLog("Watchdog error: " + e.getMessage());
+            }
+        }, 60, 60, TimeUnit.SECONDS);
+
         Dictionary<String, String[]> props = new Hashtable<>();
         props.put(EventConstants.EVENT_TOPIC, new String[]{"MW/ValueChanged", "DeviceBatteryStateChanged"});
         eventRegistration = context.registerService(EventHandler.class.getName(), this, props);
