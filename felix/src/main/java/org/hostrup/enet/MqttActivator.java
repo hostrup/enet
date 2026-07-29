@@ -49,7 +49,7 @@ public class MqttActivator implements BundleActivator, EventHandler, ISimpleCont
     /**
      * Toggles verbose logging of internal/external events to the logs dashboard.
      */
-    public volatile boolean debugMode = false; 
+    public volatile boolean debugMode = true; 
 
     private ExecutorService executor;
     private ScheduledExecutorService scheduledExecutor;
