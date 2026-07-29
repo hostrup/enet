@@ -273,8 +273,16 @@ public class TopologyBuilder {
                 String uid = e.getUID();
                 String type = e.getType().name();
                 String domain = "unknown";
-                boolean isDimmable = "DIMMER".equals(type);
-                if ("LIGHT".equals(type) || isDimmable) {
+                boolean isDimmable = "DIMMER".equalsIgnoreCase(type) || "DIMMING".equalsIgnoreCase(type);
+                if (!isDimmable && e.getState() != null) {
+                    for (Object sObj : e.getState()) {
+                        if (sObj instanceof EndpointStateLevel) {
+                            isDimmable = true;
+                            break;
+                        }
+                    }
+                }
+                if ("LIGHT".equalsIgnoreCase(type) || isDimmable) {
                     domain = "light";
                     if (isDimmable) {
                         localDimmableUids.add(uid);
@@ -358,7 +366,7 @@ public class TopologyBuilder {
         }
     }
 
-    private void publishHADiscovery(String domain, String uid, String baseTopic, String entityName, Map<String, String> meta, String entityRoom, boolean isDimmable) {
+    public void publishHADiscovery(String domain, String uid, String baseTopic, String entityName, Map<String, String> meta, String entityRoom, boolean isDimmable) {
         String configTopic = HA_PREFIX + "/" + domain + "/enet_" + uid + "/config";
         StringBuilder json = new StringBuilder("{").append("\"~\":\"").append(baseTopic).append("\",")
             .append("\"name\":\"").append(escapeJson(entityName)).append("\",").append("\"unique_id\":\"enet_").append(uid).append("\",");

@@ -250,9 +250,10 @@ public class MqttManager implements MqttCallbackExtended {
                         if (core.debugMode) core.addLog("DEBUG EGRESS: [" + eName + "] Publishing immediate cover state: " + stateJson);
                         publish(baseTopic + "/state", stateJson, 0, true);
                     }
-                } else if (hasBrightness && isDimmable && haBright >= 0) {
+                } else if (hasBrightness && (isDimmable || baseTopic.contains("/light/")) && haBright >= 0) {
                     // Dimmable device: Setting level automatically turns it ON at that level.
                     // We only send the EndpointStateLevel command to minimize KNX-RF bus traffic.
+                    core.getTopologyBuilder().dimmableUids.add(uid);
                     int enetPct = (int) Math.round((haBright / 255.0) * 100.0);
                     EndpointStateLevel level = new EndpointStateLevel(); 
                     level.setValue(enetPct);
