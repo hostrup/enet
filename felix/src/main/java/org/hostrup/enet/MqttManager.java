@@ -21,7 +21,7 @@ import com.google.gson.JsonParser;
  * for the Eclipse Paho MQTT Client, bridging the local eNet system to the MQTT Broker.
  */
 public class MqttManager implements MqttCallbackExtended {
-    private static final String CLIENT_ID = "eNet_Native_Gateway";
+    private static final String CLIENT_ID = "eNet_Native_Gateway_Hostrup";
     private volatile MqttClient mqttClient;
     private final MqttActivator core;
     private final Object connectLock = new Object();
