@@ -388,7 +388,33 @@ public class MqttActivator implements BundleActivator, EventHandler, ISimpleCont
                         return;
                     }
                     String power = val.name(); 
-                    String payload = "{\"state\":\"" + (baseTopic.contains("/cover/") ? ("ON".equals(power) ? "open" : "closed") : power) + "\"}";
+                    String payload;
+                    if (baseTopic.contains("/cover/")) {
+                        payload = "{\"state\":\"" + ("ON".equals(power) ? "open" : "closed") + "\"}";
+                    } else if ("ON".equals(power) && topologyBuilder.dimmableUids.contains(endpointId)) {
+                        int bright = -1;
+                        try {
+                            if (simpleControl != null) {
+                                Endpoint ep = simpleControl.getEndpoint(endpointId);
+                                if (ep != null && ep.getState() != null) {
+                                    for (Object sObj : ep.getState()) {
+                                        if (sObj instanceof EndpointStateLevel) {
+                                            int pct = ((EndpointStateLevel) sObj).getValue();
+                                            bright = (int) Math.round((pct / 100.0) * 255.0);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (Exception ignore) {}
+                        if (bright >= 0) {
+                            payload = "{\"state\":\"ON\",\"brightness\":" + bright + "}";
+                        } else {
+                            payload = "{\"state\":\"ON\"}";
+                        }
+                    } else {
+                        payload = "{\"state\":\"" + power + "\"}";
+                    }
                     if (debugMode) addLog("DEBUG INGRESS (Event): [" + eName + "] Updating power status to: " + payload);
                     mqttManager.publish(baseTopic + "/state", payload, 0, true);
                 } else if (state instanceof EndpointStateLevel) {
