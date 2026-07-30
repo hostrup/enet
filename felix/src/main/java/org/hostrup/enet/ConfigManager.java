@@ -43,9 +43,9 @@ public class ConfigManager {
             mqttBroker = p.getProperty("MQTT_BROKER", "");
             mqttUser = p.getProperty("MQTT_USER", "");
             mqttPass = p.getProperty("MQTT_PASS", "");
-            mqttClientId = p.getProperty("MQTT_CLIENT_ID", "eNet_Gateway_" + java.util.UUID.randomUUID().toString().substring(0, 8));
+            mqttClientId = p.getProperty("MQTT_CLIENT_ID", "enet_gateway");
         } catch (Exception ignored) {
-            mqttClientId = "eNet_Gateway_" + java.util.UUID.randomUUID().toString().substring(0, 8);
+            mqttClientId = "enet_gateway";
         }
     }
 
