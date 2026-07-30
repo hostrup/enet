@@ -18,6 +18,7 @@ public class ConfigManager {
     private String mqttBroker = "";
     private String mqttUser = "";
     private String mqttPass = "";
+    private String mqttClientId = "";
     private final MqttActivator core;
 
     /**
@@ -42,8 +43,9 @@ public class ConfigManager {
             mqttBroker = p.getProperty("MQTT_BROKER", "");
             mqttUser = p.getProperty("MQTT_USER", "");
             mqttPass = p.getProperty("MQTT_PASS", "");
+            mqttClientId = p.getProperty("MQTT_CLIENT_ID", "eNet_Gateway_" + java.util.UUID.randomUUID().toString().substring(0, 8));
         } catch (Exception ignored) {
-            // Properties file might not exist yet, which is fine and expected on initial run
+            mqttClientId = "eNet_Gateway_" + java.util.UUID.randomUUID().toString().substring(0, 8);
         }
     }
 
@@ -102,4 +104,5 @@ public class ConfigManager {
     public String getMqttBroker() { return mqttBroker; }
     public String getMqttUser() { return mqttUser; }
     public String getMqttPass() { return mqttPass; }
+    public String getMqttClientId() { return mqttClientId; }
 }
