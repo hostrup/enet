@@ -474,6 +474,14 @@ public class MqttActivator implements BundleActivator, EventHandler, ISimpleCont
         });
     }
 
+    private static Method NULL_SENTINEL_METHOD = null;
+    static {
+        try {
+            NULL_SENTINEL_METHOD = MqttActivator.class.getDeclaredMethod("nullSentinelPlaceholder");
+        } catch (Exception ignore) {}
+    }
+    private void nullSentinelPlaceholder() {}
+
     public Object getServiceByFilter(String className) {
         try {
             org.osgi.framework.ServiceReference[] refs = context.getServiceReferences((String)null, "(objectClass=" + className + ")");
@@ -498,6 +506,9 @@ public class MqttActivator implements BundleActivator, EventHandler, ISimpleCont
         Class<?> clazz = obj.getClass();
         String key = getCacheKey(clazz, method, types);
         Method m = reflectionCache.get(key);
+        if (m == NULL_SENTINEL_METHOD) {
+            return null;
+        }
         if (m == null) {
             try {
                 m = clazz.getMethod(method, types);
@@ -519,8 +530,12 @@ public class MqttActivator implements BundleActivator, EventHandler, ISimpleCont
                     }
                 }
             }
+            if (m == null && NULL_SENTINEL_METHOD != null) {
+                reflectionCache.put(key, NULL_SENTINEL_METHOD);
+                return null;
+            }
         }
-        if (m != null) {
+        if (m != null && m != NULL_SENTINEL_METHOD) {
             try {
                 return m.invoke(obj, args);
             } catch (Exception e) {
