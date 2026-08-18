@@ -231,13 +231,14 @@ public class MqttManager implements MqttCallbackExtended {
                 boolean isCover = baseTopic.contains("/cover/");
 
                 if (isCover) {
-                    if (positionVal >= 0 && positionVal <= 100) {
+                    if (positionVal >= 0) {
+                        int clampedPos = Math.max(0, Math.min(100, positionVal));
                         EndpointStateLevel level = new EndpointStateLevel(); 
-                        level.setValue(positionVal);
+                        level.setValue(clampedPos);
                         sc.handleControlRequest(uid, level, "hostrup_mqtt");
                         
-                        String coverState = (positionVal > 0) ? "open" : "closed";
-                        String stateJson = "{\"state\":\"" + coverState + "\",\"position\":" + positionVal + "}";
+                        String coverState = (clampedPos > 0) ? "open" : "closed";
+                        String stateJson = "{\"state\":\"" + coverState + "\",\"position\":" + clampedPos + "}";
                         if (core.debugMode) core.addLog("DEBUG EGRESS: [" + eName + "] Publishing immediate cover position: " + stateJson);
                         publish(baseTopic + "/state", stateJson, 0, true);
                     } else if (hasState && (stateOn || stateOff)) {
@@ -254,12 +255,13 @@ public class MqttManager implements MqttCallbackExtended {
                     // Dimmable device: Setting level automatically turns it ON at that level.
                     // We only send the EndpointStateLevel command to minimize KNX-RF bus traffic.
                     core.getTopologyBuilder().dimmableUids.add(uid);
-                    int enetPct = (int) Math.round((haBright / 255.0) * 100.0);
+                    int clampedBright = Math.max(0, Math.min(255, haBright));
+                    int enetPct = Math.max(0, Math.min(100, (int) Math.round((clampedBright / 255.0) * 100.0)));
                     EndpointStateLevel level = new EndpointStateLevel(); 
                     level.setValue(enetPct);
                     sc.handleControlRequest(uid, level, "hostrup_mqtt");
                     
-                    String stateJson = "{\"state\":\"ON\",\"brightness\":" + haBright + ",\"position\":" + enetPct + "}";
+                    String stateJson = "{\"state\":\"ON\",\"brightness\":" + clampedBright + ",\"position\":" + enetPct + "}";
                     if (core.debugMode) core.addLog("DEBUG EGRESS: [" + eName + "] Publishing immediate dim-state: " + stateJson);
                     publish(baseTopic + "/state", stateJson, 0, true);
                 } else if (hasState && (stateOn || stateOff)) {
