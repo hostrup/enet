@@ -70,6 +70,11 @@ public class MqttActivator implements BundleActivator, EventHandler, ISimpleCont
     private final java.util.Map<String, String> buttonRockerStates = new java.util.concurrent.ConcurrentHashMap<>();
     
     /**
+     * Active scheduled futures for button IDLE resets to prevent overlapping timer cancellations.
+     */
+    private final java.util.Map<String, java.util.concurrent.ScheduledFuture<?>> buttonIdleFutures = new java.util.concurrent.ConcurrentHashMap<>();
+    
+    /**
      * Cache for reflection methods.
      */
     private final java.util.Map<String, Method> reflectionCache = new java.util.concurrent.ConcurrentHashMap<>();
@@ -185,6 +190,7 @@ public class MqttActivator implements BundleActivator, EventHandler, ISimpleCont
         }
 
         try {
+            buttonIdleFutures.clear();
             if (mqttManager != null) mqttManager.disconnect();
         } catch (Exception e) {
             System.err.println("Error disconnecting mqttManager: " + e.getMessage());
@@ -371,10 +377,18 @@ public class MqttActivator implements BundleActivator, EventHandler, ISimpleCont
                                                 if (debugMode) addLog("DEBUG INGRESS [BUTTON]: [" + btnName + "] State -> " + btnState + " (time=" + switchTime + ")");
                                                 mqttManager.publish(btnTopic + "/state", btnState, 0, false);
                                                 
+                                                java.util.concurrent.ScheduledFuture<?> existingFuture = buttonIdleFutures.get(btnUid);
+                                                if (existingFuture != null && !existingFuture.isDone()) {
+                                                    existingFuture.cancel(false);
+                                                }
+                                                
                                                 final String finalTopic = btnTopic;
-                                                scheduledExecutor.schedule(() -> {
+                                                final String finalBtnUid = btnUid;
+                                                java.util.concurrent.ScheduledFuture<?> future = scheduledExecutor.schedule(() -> {
                                                     mqttManager.publish(finalTopic + "/state", "IDLE", 0, false);
+                                                    buttonIdleFutures.remove(finalBtnUid);
                                                 }, 350, TimeUnit.MILLISECONDS);
+                                                buttonIdleFutures.put(btnUid, future);
                                             }
                                         }
                                     }
