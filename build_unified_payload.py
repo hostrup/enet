@@ -156,8 +156,10 @@ def main():
     # -------------------------------------------------------------------------
     print_step(4, "Bygger udrulningspayload og installationsscript")
     
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+
     # Indlæs MQTT gateway JAR
-    mqtt_jar_path = "felix/target/enet-mqtt-2.0-PRODUCTION.jar"
+    mqtt_jar_path = os.path.join(script_dir, "felix", "target", "enet-mqtt-2.0-PRODUCTION.jar")
     mqtt_jar_data = None
     if os.path.exists(mqtt_jar_path):
         with open(mqtt_jar_path, "rb") as f:
@@ -169,7 +171,7 @@ def main():
         sys.exit(1)
 
     # Indlæs Dropbear (hvis den findes lokalt)
-    dropbear_path = "dropbearmulti"
+    dropbear_path = os.path.join(script_dir, "dropbearmulti")
     dropbear_data = None
     if os.path.exists(dropbear_path):
         with open(dropbear_path, "rb") as f:
@@ -184,7 +186,7 @@ def main():
     
     installer_script = f'''#!/bin/sh
 # ============================================================
-# eNet Unified Installer — Korer som root via Zip Slip RCE
+# eNet Unified Installer — Kører som root via Zip Slip RCE
 # Konfigureret dynamisk via Python wizard
 # ============================================================
 set -e
@@ -196,63 +198,85 @@ echo " eNet Unified Installer — Starter $(date)"
 echo "================================================"
 
 # 1. Gør filsystemet skrivbart
-echo "[1/6] Remounting filesystem as read-write..."
+echo "[1/7] Remounting filesystem as read-write..."
 mount -o remount,rw / 2>/dev/null || true
 
 # 2. Sæt root password
-echo "[2/6] Setting root SSH password..."
+echo "[2/7] Setting root SSH password..."
 if command -v chpasswd >/dev/null 2>&1; then
     echo "root:{root_ssh_pass}" | chpasswd
 else
     echo -e "{root_ssh_pass}\\n{root_ssh_pass}" | passwd root
 fi
 
-# 3. Opsæt Dropbear SSH
-echo "[3/6] Configuring Dropbear SSH..."
-DROPBEAR_BIN=""
-DROPBEARKEY_BIN=""
+# 3. Opret og konfigurer Dropbear som en uafhængig SysVinit-tjeneste
+echo "[3/7] Setting up dedicated Dropbear SysVinit service (/etc/init.d/dropbear)..."
+cat << 'DROPEOF' > /etc/init.d/dropbear
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          dropbear
+# Required-Start:    networking
+# Required-Stop:     
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Dropbear SSH server
+### END INIT INFO
 
-if [ -x /usr/sbin/dropbearmulti ]; then
-    echo "  Using local dropbearmulti (uploaded)"
-    DROPBEAR_BIN="/usr/sbin/dropbearmulti dropbear"
-    DROPBEARKEY_BIN="/usr/sbin/dropbearmulti dropbearkey"
-    ln -sf /usr/sbin/dropbearmulti /usr/sbin/dropbear 2>/dev/null || true
-    ln -sf /usr/sbin/dropbearmulti /usr/bin/dropbearkey 2>/dev/null || true
-    ln -sf /usr/sbin/dropbearmulti /usr/bin/scp 2>/dev/null || true
-    ln -sf /usr/sbin/dropbearmulti /usr/bin/dbclient 2>/dev/null || true
-elif command -v dropbear >/dev/null 2>&1; then
-    echo "  Using existing dropbear in path"
-    DROPBEAR_BIN="dropbear"
-elif [ -x /usr/sbin/dropbear ]; then
-    echo "  Using existing /usr/sbin/dropbear"
-    DROPBEAR_BIN="/usr/sbin/dropbear"
-fi
+DROPBEAR_BIN=/home/insta/dropbear
+[ -x /usr/sbin/dropbearmulti ] && DROPBEAR_BIN=/usr/sbin/dropbearmulti
+[ -x /usr/sbin/dropbear ] && DROPBEAR_BIN=/usr/sbin/dropbear
 
-if [ -z "$DROPBEARKEY_BIN" ]; then
-    if command -v dropbearkey >/dev/null 2>&1; then
-        DROPBEARKEY_BIN="dropbearkey"
-    elif [ -x /usr/bin/dropbearkey ]; then
-        DROPBEARKEY_BIN="/usr/bin/dropbearkey"
+RSA_KEY=/home/insta/dropbear_rsa_host_key
+ED25519_KEY=/home/insta/dropbear_ed25519_host_key
+ECDSA_KEY=/home/insta/dropbear_ecdsa_host_key
+DSS_KEY=/home/insta/dropbear_dss_host_key
+PORT=22
+
+start() {{
+    if pidof dropbear >/dev/null; then
+        return 0
     fi
-fi
+    echo "Starting Dropbear SSH server on port $PORT..."
+    $DROPBEAR_BIN -R -p $PORT -r "$RSA_KEY" -r "$ED25519_KEY" -r "$ECDSA_KEY" -r "$DSS_KEY" 2>/dev/null || $DROPBEAR_BIN -R -p $PORT 2>/dev/null &
+}}
 
-if [ -n "$DROPBEARKEY_BIN" ]; then
-    mkdir -p /etc/dropbear
-    [ ! -f /etc/dropbear/dropbear_rsa_host_key ] && $DROPBEARKEY_BIN -t rsa -f /etc/dropbear/dropbear_rsa_host_key 2>/dev/null || true
-    [ ! -f /etc/dropbear/dropbear_ecdsa_host_key ] && $DROPBEARKEY_BIN -t ecdsa -f /etc/dropbear/dropbear_ecdsa_host_key 2>/dev/null || true
-    [ ! -f /etc/dropbear/dropbear_ed25519_host_key ] && $DROPBEARKEY_BIN -t ed25519 -f /etc/dropbear/dropbear_ed25519_host_key 2>/dev/null || true
-fi
+stop() {{
+    echo "Stopping Dropbear SSH server..."
+    killall dropbear 2>/dev/null || true
+}}
 
-killall dropbear 2>/dev/null || true
-sleep 1
-if [ -n "$DROPBEAR_BIN" ]; then
-    $DROPBEAR_BIN -E -R -p 22 2>/tmp/dropbear.log &
-    sleep 1
-fi
+case "$1" in
+    start) start ;;
+    stop) stop ;;
+    restart) start ;;
+    status)
+        if pidof dropbear >/dev/null; then
+            echo "Dropbear is running (PID $(pidof dropbear))."
+        else
+            echo "Dropbear is stopped."
+        fi
+        ;;
+    *)
+        echo "Usage: $0 {{start|stop|restart|status}}"
+        exit 1
+        ;;
+esac
+exit 0
+DROPEOF
+chmod +x /etc/init.d/dropbear
+
+# Opret SysVinit runlevel links
+ln -sf ../init.d/dropbear /etc/rc2.d/S20dropbear 2>/dev/null || true
+ln -sf ../init.d/dropbear /etc/rc3.d/S20dropbear 2>/dev/null || true
+ln -sf ../init.d/dropbear /etc/rc4.d/S20dropbear 2>/dev/null || true
+ln -sf ../init.d/dropbear /etc/rc5.d/S20dropbear 2>/dev/null || true
+
+# Start Dropbear nu
+/etc/init.d/dropbear start || true
 
 # 4. Skriv MQTT gateway parametre
-echo "[4/6] Writing MQTT gateway properties..."
-mkdir -p {os.path.dirname(ENET_MQTT_PROP)}
+echo "[4/7] Writing MQTT gateway properties..."
+mkdir -p /home/insta/felix-framework/conf
 cat > {ENET_MQTT_PROP} << 'MQTTEOF'
 # eNet Native MQTT Gateway Configuration
 MQTT_BROKER={mqtt_uri}
@@ -261,7 +285,7 @@ MQTT_PASS={mqtt_pass}
 MQTTEOF
 
 # 5. Felix config opdatering
-echo "[5/6] Registering bundle in Felix config..."
+echo "[5/7] Registering bundle in Felix config..."
 CONFIG="{ENET_CONFIG_PROP}"
 BUNDLE_URI="file:///home/insta/felix-framework/bundle/startlevel4/enet-mqtt-2.0-PRODUCTION.jar"
 
@@ -269,35 +293,36 @@ if [ -f "$CONFIG" ]; then
     cp "$CONFIG" "${{CONFIG}}.bak_$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
     if ! grep -q "enet-mqtt" "$CONFIG" 2>/dev/null; then
         echo "felix.auto.install.4=${{BUNDLE_URI}}" >> "$CONFIG"
-    fi
-    if ! grep -q "enet-mqtt" "$CONFIG" 2>/dev/null; then
         echo "felix.auto.start.4=${{BUNDLE_URI}}" >> "$CONFIG"
     fi
 fi
 
-# 6. Autostart Dropbear SSH i init
-echo "[6/6] Injecting autostart into init.d..."
+# 6. Autostart-sikring i felix.sh (forhindrer duplikerede Dropbear instanser)
+echo "[6/7] Securing /etc/init.d/felix.sh with dropbear pid check..."
 INIT_SCRIPT="{ENET_INIT_SCRIPT}"
-if [ -f "$INIT_SCRIPT" ] && ! grep -q "dropbear" "$INIT_SCRIPT" 2>/dev/null; then
-    cp "$INIT_SCRIPT" "${{INIT_SCRIPT}}.bak_$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
-    awk '
-        /^[[:space:]]*start[[:space:]]*)/ {{
-            print
-            print "    # === Auto-injected: Start Dropbear SSH ==="
-            print "    if [ -x /usr/sbin/dropbearmulti ]; then"
-            print "        /usr/sbin/dropbearmulti dropbear -E -R -p 22 &"
-            print "    elif [ -x /usr/sbin/dropbear ]; then"
-            print "        /usr/sbin/dropbear -E -R -p 22 &"
-            print "    fi"
-            next
-        }}
-        {{ print }}
-    ' "$INIT_SCRIPT" > /tmp/felix_init_new
-    if [ -s /tmp/felix_init_new ]; then
-        cat /tmp/felix_init_new > "$INIT_SCRIPT"
-        chmod +x "$INIT_SCRIPT"
+if [ -f "$INIT_SCRIPT" ]; then
+    if grep -q "dropbear -R" "$INIT_SCRIPT" 2>/dev/null; then
+        sed -i 's|/home/insta/dropbear -R.*|pidof dropbear >/dev/null || /etc/init.d/dropbear start|' "$INIT_SCRIPT"
+    elif ! grep -q "dropbear" "$INIT_SCRIPT" 2>/dev/null; then
+        sed -i 's|echo "Starting Felix..."|echo "Starting Felix..."\n\t\tpidof dropbear >/dev/null || /etc/init.d/dropbear start|' "$INIT_SCRIPT"
     fi
 fi
+
+# 7. Genopret originale script-filer og remount ro
+echo "[7/7] Restoring clean restartFelix/resetSystem scripts and remounting read-only..."
+cat << 'RESTARTEOF' > /home/insta/felix-framework/script/restartFelix
+#!/bin/sh
+/etc/init.d/felix.sh restart
+RESTARTEOF
+chmod +x /home/insta/felix-framework/script/restartFelix
+
+cat << 'RESETEOF' > /home/insta/felix-framework/script/resetSystem
+#!/bin/sh
+/sbin/reboot
+RESETEOF
+chmod +x /home/insta/felix-framework/script/resetSystem
+
+mount -o remount,ro / 2>/dev/null || true
 
 echo "================================================"
 echo " eNet Unified Installer — Færdig $(date)"

@@ -154,9 +154,9 @@ Efter succesfuld udrulning anbefales det at hærde eNet-serveren yderligere:
    ssh-copy-id root@10.0.0.9
    ```
 2. **Deaktiver password-login i Dropbear:**
-   Rediger `/etc/init.d/felix.sh` på boksen og tilføj `-s` flaget til Dropbear-opstartskommandoen for at deaktivere password-logins helt:
+   Rediger `/etc/init.d/dropbear` på boksen og tilføj `-s` flaget til Dropbear-opstartskommandoen for at deaktivere password-logins helt:
    ```bash
-   # I /etc/init.d/felix.sh:
-   /usr/sbin/dropbearmulti dropbear -s -E -R -p 22 &
+   # I /etc/init.d/dropbear i start() funktionen:
+   $DROPBEAR_BIN -s -R -p $PORT -r "$RSA_KEY" -r "$ED25519_KEY" -r "$ECDSA_KEY" -r "$DSS_KEY" &
    ```
    Dette sikrer, at kun enheder med godkendte SSH-nøgler kan få SSH-adgang til boksen.
