@@ -114,12 +114,20 @@ public class MqttActivator implements BundleActivator, EventHandler, ISimpleCont
         setupWebDashboard();
         mqttManager.connectMqtt();
 
-        // Start a watchdog to monitor the MQTT connection and attempt reconnection if lost
+        // Start a watchdog to monitor MQTT connectivity without racing Paho's built-in auto-reconnect
         scheduledExecutor.scheduleWithFixedDelay(() -> {
             try {
                 if (mqttManager != null && !mqttManager.isConnected()) {
-                    addLog("Watchdog: MQTT disconnected. Reconnecting...");
-                    mqttManager.connectMqtt();
+                    if (!mqttManager.isClientCreated()) {
+                        addLog("Watchdog: MQTT client uninitialized. Initiating connection...");
+                        mqttManager.connectMqtt();
+                    } else {
+                        long downTime = mqttManager.getDisconnectedDurationSeconds();
+                        if (downTime > 180) {
+                            addLog("Watchdog: MQTT disconnected for " + downTime + "s despite Paho auto-reconnect. Forcing clean reconnect...");
+                            mqttManager.forceReconnect();
+                        }
+                    }
                 }
             } catch (Exception e) {
                 addLog("Watchdog error: " + e.getMessage());

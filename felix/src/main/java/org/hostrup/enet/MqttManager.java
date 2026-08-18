@@ -24,6 +24,7 @@ public class MqttManager implements MqttCallbackExtended {
     private volatile MqttClient mqttClient;
     private final MqttActivator core;
     private final Object connectLock = new Object();
+    private volatile long lastDisconnectTimestamp = 0;
 
     /**
      * Constructs the MqttManager instance.
@@ -78,6 +79,7 @@ public class MqttManager implements MqttCallbackExtended {
 
     @Override
     public void connectComplete(boolean reconnect, String serverURI) {
+        lastDisconnectTimestamp = 0;
         core.getExecutor().submit(() -> {
             try {
                 if (mqttClient != null && mqttClient.isConnected()) {
@@ -101,8 +103,23 @@ public class MqttManager implements MqttCallbackExtended {
                         mqttClient.disconnect();
                     }
                     mqttClient.close();
+                    mqttClient = null;
                 }
             } catch (Exception ignored) {}
+        }
+    }
+
+    /**
+     * Forcibly disconnects and recreates the MQTT client instance.
+     */
+    public void forceReconnect() {
+        synchronized (connectLock) {
+            if (mqttClient != null) {
+                try { mqttClient.disconnectForcibly(); } catch (Exception ignored) {}
+                try { mqttClient.close(); } catch (Exception ignored) {}
+                mqttClient = null;
+            }
+            connectMqtt();
         }
     }
 
@@ -126,6 +143,19 @@ public class MqttManager implements MqttCallbackExtended {
      * @return True if connected, false otherwise.
      */
     public boolean isConnected() { return mqttClient != null && mqttClient.isConnected(); }
+
+    /**
+     * Checks if the MQTT client instance exists.
+     */
+    public boolean isClientCreated() { return mqttClient != null; }
+
+    /**
+     * Returns the duration in seconds since disconnection was registered, or 0 if connected.
+     */
+    public long getDisconnectedDurationSeconds() {
+        if (isConnected() || lastDisconnectTimestamp == 0) return 0;
+        return (System.currentTimeMillis() - lastDisconnectTimestamp) / 1000;
+    }
 
     /**
      * Triggered when a message arrives from the MQTT Broker.
@@ -280,6 +310,9 @@ public class MqttManager implements MqttCallbackExtended {
         });
     }
 
-    @Override public void connectionLost(Throwable cause) { core.addLog("MQTT Connection Lost. Auto-reconnecting..."); }
+    @Override public void connectionLost(Throwable cause) { 
+        lastDisconnectTimestamp = System.currentTimeMillis();
+        core.addLog("MQTT Connection Lost: " + (cause != null ? cause.getMessage() : "unknown") + ". Auto-reconnecting via Paho..."); 
+    }
     @Override public void deliveryComplete(IMqttDeliveryToken token) {}
 }
