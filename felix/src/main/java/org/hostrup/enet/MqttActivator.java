@@ -49,7 +49,7 @@ public class MqttActivator implements BundleActivator, EventHandler, ISimpleCont
     /**
      * Toggles verbose logging of internal/external events to the logs dashboard.
      */
-    public volatile boolean debugMode = true; 
+    public volatile boolean debugMode = false; 
 
     private ExecutorService executor;
     private ScheduledExecutorService scheduledExecutor;
@@ -183,7 +183,9 @@ public class MqttActivator implements BundleActivator, EventHandler, ISimpleCont
         logBuffer.offer(ts + " - " + message);
         while (logBuffer.size() > 100) logBuffer.poll();
         if (mqttManager != null && mqttManager.isConnected()) {
-            mqttManager.publish("enet/gateway/log", message, 0, false);
+            if (!message.startsWith("OMNI-SNIFFER") && !message.startsWith("DEBUG")) {
+                mqttManager.publish("enet/gateway/log", message, 0, false);
+            }
         }
         // Only write to syslog/disk for critical/config messages to save eMMC flash writes and CPU
         if (!message.startsWith("OMNI-SNIFFER") && !message.startsWith("DEBUG")) {
