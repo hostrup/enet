@@ -6,25 +6,26 @@
 # =====================================================
 set -e
 
-FELIX_DIR="/hostrup/data/dev/enet/felix"
-ENET_HOST="10.0.0.9"
-ENET_PASS="pvxtwl"
+SCRIPT_DIR="$(builtin cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+FELIX_DIR="$(builtin cd "$SCRIPT_DIR/../felix" >/dev/null 2>&1 && pwd)"
+ENET_HOST="${ENET_HOST:-"10.0.0.9"}"
+ENET_PASS="${ENET_PASS:-"pvxtwl"}"
 JAR="$FELIX_DIR/target/enet-mqtt-2.0-PRODUCTION.jar"
 REMOTE_PATH="/home/insta/felix-framework/bundle/startlevel4/enet-mqtt-2.0-PRODUCTION.jar"
 
 echo "⏳ 1. Bygger..."
-bash /hostrup/data/dev/enet/scripts/build.sh
+bash "$SCRIPT_DIR/build.sh"
 
 echo ""
 echo "📡 2. Uploader .jar til eNet-boksen ($ENET_HOST) via SSH pipe..."
 # Bemærk: Dropbear på eNet-boksen understøtter IKKE sftp - bruger cat pipe i stedet
-cat "$JAR" | sshpass -p "$ENET_PASS" ssh -o StrictHostKeyChecking=no root@${ENET_HOST} \
+cat "$JAR" | sshpass -p "$ENET_PASS" ssh -o StrictHostKeyChecking=no "root@${ENET_HOST}" \
     "cat > $REMOTE_PATH"
-echo "   Upload OK! ($(du -sh $JAR | cut -f1))"
+echo "   Upload OK! ($(du -sh "$JAR" | cut -f1))"
 
 echo ""
 echo "🔄 3. Trigger OSGi Hot-Reload..."
-RELOAD_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://${ENET_HOST}:8090/mqtt/api?action=reload")
+RELOAD_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "http://${ENET_HOST}:8090/mqtt?action=reload")
 if [ "$RELOAD_RESPONSE" = "200" ]; then
     echo "   Hot-Reload signal sendt (HTTP 200)"
 else
@@ -34,5 +35,5 @@ fi
 
 echo ""
 echo "🎉 Deploy komplet!"
-echo "   Tjek logs: bash /hostrup/data/dev/enet/scripts/watch-logs.sh"
-echo "   Tjek MQTT: bash /hostrup/data/dev/enet/scripts/test-mqtt.sh"
+echo "   Tjek logs: bash $SCRIPT_DIR/watch-logs.sh"
+echo "   Tjek MQTT: bash $SCRIPT_DIR/test-mqtt.sh"

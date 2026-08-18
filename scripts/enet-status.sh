@@ -5,13 +5,13 @@
 # bundles og MQTT config
 # =====================================================
 
-ENET_HOST="10.0.0.9"
-ENET_PASS="pvxtwl"
+ENET_HOST="${ENET_HOST:-"10.0.0.9"}"
+ENET_PASS="${ENET_PASS:-"pvxtwl"}"
 
 echo "🔍 Henter status fra eNet-boksen ($ENET_HOST)..."
 echo ""
 
-sshpass -p "$ENET_PASS" ssh -o StrictHostKeyChecking=no root@"$ENET_HOST" '
+sshpass -p "$ENET_PASS" ssh -o StrictHostKeyChecking=no "root@$ENET_HOST" '
 echo "=== JAVA PROCESS ==="
 ps w | grep java | grep -v grep
 
