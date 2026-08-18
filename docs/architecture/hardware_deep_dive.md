@@ -61,18 +61,32 @@ Kommunikationen over `/dev/ttymxc1` følger standard KNX FT1.2 overførsel:
 
 ### 1. FT1.2 Variable Frame Format (Send/Receive Telegram)
 ```
-+------+--------+--------+------+--------------+----------+------+
-| 0x68 | Length | Length | 0x68 | Control Byte | Data...  | 0x16 |
-+------+--------+--------+------+--------------+----------+------+
++------+--------+--------+------+--------------+----------+----------+------+
+| 0x68 | Length | Length | 0x68 | Control Byte | cEMI...  | Checksum | 0x16 |
++------+--------+--------+------+--------------+----------+----------+------+
 ```
 - `0x68`: Start-byte (gentages to gange med længden imellem).
-- `Control Byte`: `0x53`, `0x73`, `0xD3` (styring af sekvensnumre og handshake).
-- `Data`: KNX cEMI ramme (`L_Data.req`, `L_Data.con`, `L_Data.ind`).
+- `Control Byte`: `0x53`, `0x73`, `0xD3`, `0xF3` (styring af sekvensnumre og handshake).
+- `cEMI Frame`:
+  - `0x11`: `L_Data.req` (Host sender RF-kommando).
+  - `0x2E`: `L_Data.con` (Radio bekræfter afsendelse på 868 MHz).
+  - `0x29`: `L_Data.ind` (Radio modtager trådløs status fra aktuator/kontakt).
+- `Checksum`: Aritmetisk 8-bit sum af alle payload-bytes.
 - `0x16`: Slut-byte (End character).
 
-### 2. FT1.2 Acknowledgment (ACK)
+### 2. Afkodede eNet Funktionskoder (Payload Opcodes)
+Gennem live test på dæmperne i Multirum har vi isoleret og afkodet de præcise eNet funktionskoder:
+
+| Handling | Funktionskode | Værdibyte | Eksempel Hex Payload |
+|---|---|---|---|
+| **Tænd (ON)** | `0x50` | `0x01` (ON) | `68 11 11 68 73 11 00 ... 50 01 [CS] 16` |
+| **Sluk (OFF)** | `0x50` | `0x00` (OFF) | `68 11 11 68 53 11 00 ... 50 00 [CS] 16` |
+| **Dæmp (50%)** | `0x52` | `0x7F` (127 / 255) | `68 11 11 68 53 11 00 ... 52 7F [CS] 16` |
+| **Dæmp (20%)** | `0x52` | `0x33` (51 / 255) | `68 11 11 68 73 11 00 ... 52 33 [CS] 16` |
+
+### 3. FT1.2 Acknowledgment (ACK)
 - `0xE5`: Single-character ACK.
-- ATxmega returnerer `0xE5` inden for få millisekunder efter modtagelse af en gyldig FT1.2 ramme.
+- Både ATxmega og Host sender `0xE5` øjeblikkeligt (inden for <5 ms) ved hver modtaget ramme for at bekræfte modtagelsen på UART-bussen.
 
 ---
 
