@@ -89,7 +89,21 @@ public class MqttActivator implements BundleActivator, EventHandler, ISimpleCont
     public void start(BundleContext context) throws Exception {
         this.context = context;
         this.executor = new ThreadPoolExecutor(2, 4, 60L, TimeUnit.SECONDS,
-            new ArrayBlockingQueue<Runnable>(200), new ThreadPoolExecutor.DiscardOldestPolicy());
+            new ArrayBlockingQueue<Runnable>(200),
+            (r, exec) -> {
+                if (!exec.isShutdown()) {
+                    exec.getQueue().poll();
+                    String msg = "WARNING: Executor queue saturated (200). Oldest task discarded for incoming request.";
+                    System.err.println("HostrupEnet: " + msg);
+                    String ts;
+                    synchronized (LOG_TIME_FORMAT) {
+                        ts = LOG_TIME_FORMAT.format(new Date());
+                    }
+                    logBuffer.offer(ts + " - " + msg);
+                    while (logBuffer.size() > 100) logBuffer.poll();
+                    exec.execute(r);
+                }
+            });
         this.scheduledExecutor = java.util.concurrent.Executors.newScheduledThreadPool(1);
         this.webServerExecutor = java.util.concurrent.Executors.newFixedThreadPool(2);
         
