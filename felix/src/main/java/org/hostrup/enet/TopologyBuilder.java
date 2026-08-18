@@ -414,8 +414,47 @@ public class TopologyBuilder {
         core.getMqttManager().publish("enet/gateway/status", "Online", 0, true);
     }
 
+    public String sanitizeName(String input) {
+        if (input == null) return "";
+        String s = input.trim();
+        // Repair corrupted question-mark artifacts from legacy ISO-8859-1/ANSI imports
+        s = s.replace("Sluk n?sten alt", "Sluk næsten alt");
+        s = s.replace("T?nd udend?rslys", "Tænd udendørslys");
+        s = s.replace("T?nd", "Tænd");
+        s = s.replace("t?nd", "tænd");
+        s = s.replace("Sluk n?sten", "Sluk næsten");
+        s = s.replace("udend?rs", "udendørs");
+        s = s.replace("V?relse", "Værelse");
+        s = s.replace("v?relse", "værelse");
+        s = s.replace("K?kken", "Køkken");
+        s = s.replace("k?kken", "køkken");
+        return s;
+    }
+
     public String escapeJson(String input) {
         if (input == null) return "";
-        return input.replace("\\", "\\\\").replace("\"", "\\\"");
+        String sanitized = sanitizeName(input);
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < sanitized.length(); i++) {
+            char c = sanitized.charAt(i);
+            switch (c) {
+                case '"': sb.append("\\\""); break;
+                case '\\': sb.append("\\\\"); break;
+                case '\b': sb.append("\\b"); break;
+                case '\f': sb.append("\\f"); break;
+                case '\n': sb.append("\\n"); break;
+                case '\r': sb.append("\\r"); break;
+                case '\t': sb.append("\\t"); break;
+                default:
+                    if (c < ' ') {
+                        String hex = "000" + Integer.toHexString(c);
+                        sb.append("\\u").append(hex.substring(hex.length() - 4));
+                    } else {
+                        sb.append(c);
+                    }
+                    break;
+            }
+        }
+        return sb.toString();
     }
 }
