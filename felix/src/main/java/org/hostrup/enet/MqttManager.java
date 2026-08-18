@@ -21,6 +21,7 @@ import com.google.gson.JsonParser;
  * for the Eclipse Paho MQTT Client, bridging the local eNet system to the MQTT Broker.
  */
 public class MqttManager implements MqttCallbackExtended {
+    private static final JsonParser JSON_PARSER = new JsonParser();
     private volatile MqttClient mqttClient;
     private final MqttActivator core;
     private final Object connectLock = new Object();
@@ -208,7 +209,7 @@ public class MqttManager implements MqttCallbackExtended {
                 boolean hasBrightness = false;
 
                 try {
-                    JsonElement jsonElement = new JsonParser().parse(rawPayload);
+                    JsonElement jsonElement = JSON_PARSER.parse(rawPayload);
                     if (jsonElement.isJsonObject()) {
                         JsonObject jsonObj = jsonElement.getAsJsonObject();
                         if (jsonObj.has("state")) {
